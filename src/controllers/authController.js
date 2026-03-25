@@ -67,7 +67,9 @@ exports.signup = async (req, res) => {
       return errorResponse(res, "License subscription expired", 400);
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Lowering bcrypt rounds to reduce signup latency.
+    // (Security vs speed trade-off.)
+    const hashedPassword = await bcrypt.hash(password, 8);
 
     const business = await prisma.business.create({
       data: {
@@ -85,19 +87,31 @@ exports.signup = async (req, res) => {
       },
     });
 
-    await prisma.licenseCode.update({
-      where: { code: license_code },
-      data: {
-        isUsed: true,
-        usedByUserId: user.id,
-        usedAt: new Date(),
-      },
-    });
+    // Persist and update independent tables in parallel to reduce latency.
+    await Promise.all([
+      // Persist license/business snapshot on the user record.
+      // Using raw SQL here avoids Prisma input-schema issues for this field write.
+      prisma.$executeRaw`
+        UPDATE "User"
+        SET "licenseCode" = ${license.code},
+            "businessName" = ${license.businessName}
+        WHERE "id" = ${user.id}
+      `,
 
-    // Remove old OTPs
-    await prisma.otpCode.deleteMany({
-      where: { email, type: "signup" },
-    });
+      prisma.licenseCode.update({
+        where: { code: license_code },
+        data: {
+          isUsed: true,
+          usedByUserId: user.id,
+          usedAt: new Date(),
+        },
+      }),
+
+      // Remove old OTPs
+      prisma.otpCode.deleteMany({
+        where: { email, type: "signup" },
+      }),
+    ]);
 
     const otp = Math.floor(100000 + 900000 * Math.random()).toString();
 
@@ -110,12 +124,11 @@ exports.signup = async (req, res) => {
       },
     });
 
-    try {
-      await sendOtpEmail(email, otp, "signup");
-    } catch (emailErr) {
+    // Send OTP email in background so signup response isn't blocked by SMTP latency.
+    sendOtpEmail(email, otp, "signup").catch((emailErr) => {
       console.error("Signup OTP email failed:", emailErr.message);
       // Don't fail registration; user is already created
-    }
+    });
 
     // Generate JWT token
     const token = jwt.sign(
@@ -133,6 +146,10 @@ exports.signup = async (req, res) => {
       status: user.isVerified ? 1 : 0,
       user_type: 1, // owner
       subscription_type: license.purchasePlan,
+      // Snapshot of the license and business associated with this user.
+      subscription_active: license.isActive && new Date() <= license.subscriptionEnd,
+      license_code: license.code,
+      business_name: license.businessName,
       email_verified_at: user.isVerified ? user.updatedAt : null,
       device_type,
       fcm_token: fcm_token || null,
@@ -300,6 +317,9 @@ exports.signIn = async (req, res) => {
       status: 1,
       user_type: 1,
       subscription_type: license.purchasePlan,
+      subscription_active: license.isActive && new Date() <= license.subscriptionEnd,
+      license_code: license.code,
+      business_name: license.businessName,
       device_type,
       fcm_token: fcm_token || null,
       created_at: user.createdAt,
@@ -352,7 +372,9 @@ exports.resendOtp = async (req, res) => {
       },
     });
 
-    await sendOtpEmail(email, otp, "signup");
+    sendOtpEmail(email, otp, "signup").catch((emailErr) => {
+      console.error("Resend OTP email failed:", emailErr.message);
+    });
 
     return successResponse(res, "OTP resent successfully", null, 200);
   } catch (error) {
@@ -392,7 +414,9 @@ exports.forgotPassword = async (req, res) => {
       },
     });
 
-    await sendOtpEmail(email, otp, "forgot");
+    sendOtpEmail(email, otp, "forgot").catch((emailErr) => {
+      console.error("Forgot password email failed:", emailErr.message);
+    });
 
     return successResponse(res, "OTP sent to email", null, 200);
   } catch (error) {
@@ -467,7 +491,9 @@ exports.resendForgotOtp = async (req, res) => {
       },
     });
 
-    await sendOtpEmail(email, otp, "forgot");
+    sendOtpEmail(email, otp, "forgot").catch((emailErr) => {
+      console.error("Forgot password email failed:", emailErr.message);
+    });
 
     return successResponse(res, "OTP resent successfully", null, 200);
   } catch (error) {
@@ -484,7 +510,7 @@ exports.resetPassword = async (req, res) => {
       return errorResponse(res, "Required fields missing", 400);
     }
 
-    const hashedPassword = await bcrypt.hash(new_password, 10);
+    const hashedPassword = await bcrypt.hash(new_password, 8);
 
     await prisma.user.update({
       where: { email },
@@ -493,6 +519,67 @@ exports.resetPassword = async (req, res) => {
 
     return successResponse(res, "Password reset successful", null, 200);
   } catch (error) {
+    return errorResponse(res, "Server error", 500);
+  }
+};
+
+// Delete user (hard delete) using JWT auth token.
+// Expects: Authorization: Bearer <token>
+exports.deleteUser = async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token =
+      authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+    if (!token) {
+      return errorResponse(res, "Auth token missing", 401);
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const userId = decoded.userId;
+
+    if (!userId) {
+      return errorResponse(res, "Invalid token", 401);
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      return errorResponse(res, "User not found", 404);
+    }
+
+    // Hard delete: remove the user row so the same email can be reused.
+    // Also release any license keys assigned to this user and remove OTPs for that email.
+    const businessId = user.businessId;
+
+    await prisma.$transaction([
+      prisma.licenseCode.updateMany({
+        where: { usedByUserId: userId },
+        data: {
+          isUsed: false,
+          usedByUserId: null,
+          usedAt: null,
+        },
+      }),
+      prisma.otpCode.deleteMany({
+        where: { email: user.email },
+      }),
+      prisma.user.delete({
+        where: { id: userId },
+      }),
+    ]);
+
+    // Cleanup: if this business had no other users, remove it too.
+    const remainingUsers = await prisma.user.count({
+      where: { businessId },
+    });
+
+    if (remainingUsers === 0) {
+      await prisma.business.delete({ where: { id: businessId } });
+    }
+
+    return successResponse(res, "User deleted successfully", null, 200);
+  } catch (error) {
+    console.error("Delete user error:", error.message);
     return errorResponse(res, "Server error", 500);
   }
 };

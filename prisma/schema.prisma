@@ -36,6 +36,10 @@ model Business {
 model User {
   id           String   @id @default(uuid())
   businessId   String
+  // Store the license info used by this user for quick reads.
+  // (Business name is also stored redundantly for easy API response.)
+  licenseCode String
+  businessName String
   name         String
   email        String   @unique
   passwordHash String
