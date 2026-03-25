@@ -69,7 +69,7 @@ exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
                 <!-- Timer Notice -->
                 <div style="background-color:#FFF3CD; border-left: 4px solid #FFC107; border-radius:4px; padding:12px 20px; text-align:left; margin-bottom:20px;">
                   <p style="margin:0; color:#856404; font-size:13px;">
-                    ⏱️ <strong>This OTP is valid for 1 minute only.</strong> Please do not share it with anyone.
+                    ⏱️ <strong>This OTP is valid for 2 minutes only.</strong> Please do not share it with anyone.
                   </p>
                 </div>
 

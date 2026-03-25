@@ -120,7 +120,7 @@ exports.signup = async (req, res) => {
         email,
         otp,
         type: "signup",
-        expiresAt: new Date(Date.now() + 60 * 1000),
+        expiresAt: new Date(Date.now() + 120 * 1000),
       },
     });
 
@@ -294,13 +294,47 @@ exports.signIn = async (req, res) => {
           email,
           otp,
           type: "signup",
-          expiresAt: new Date(Date.now() + 60 * 1000),
+          expiresAt: new Date(Date.now() + 120 * 1000),
         },
       });
 
       console.log("Login OTP:", otp);
+      sendOtpEmail(email, otp, "signup").catch((emailErr) => {
+        console.error("Login OTP email failed:", emailErr.message);
+      });
+      const token = jwt.sign(
+        { userId: user.id, businessId: user.businessId },
+        process.env.JWT_SECRET,
+        { expiresIn: "7d" },
+      );
 
-      return errorResponse(res, "Account not verified. OTP sent again.", 403);
+      const formattedUser = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        contact: user.phoneNumber,
+        status: 1,
+        user_type: 1,
+        subscription_type: license.purchasePlan,
+        subscription_active: license.isActive && new Date() <= license.subscriptionEnd,
+        license_code: license.code,
+        business_name: license.businessName,
+        email_verified_at: null,
+        device_type,
+        fcm_token: fcm_token || null,
+        created_at: user.createdAt,
+        updated_at: user.updatedAt,
+        deleted_at: user.deletedAt,
+      };
+
+      return res.status(200).json({
+        success: true,
+        message: "Account not verified. OTP sent again.",
+        data: {
+          token,
+          user: formattedUser,
+        },
+      });
     }
 
     const token = jwt.sign(
@@ -320,6 +354,7 @@ exports.signIn = async (req, res) => {
       subscription_active: license.isActive && new Date() <= license.subscriptionEnd,
       license_code: license.code,
       business_name: license.businessName,
+      email_verified_at: user.isVerified ? user.updatedAt : null,
       device_type,
       fcm_token: fcm_token || null,
       created_at: user.createdAt,
@@ -368,7 +403,7 @@ exports.resendOtp = async (req, res) => {
         email,
         otp,
         type: "signup",
-        expiresAt: new Date(Date.now() + 60 * 1000),
+        expiresAt: new Date(Date.now() + 120 * 1000),
       },
     });
 
@@ -410,7 +445,7 @@ exports.forgotPassword = async (req, res) => {
         email,
         otp,
         type: "forgot",
-        expiresAt: new Date(Date.now() + 60 * 1000),
+        expiresAt: new Date(Date.now() + 120 * 1000),
       },
     });
 
@@ -487,7 +522,7 @@ exports.resendForgotOtp = async (req, res) => {
         email,
         otp,
         type: "forgot",
-        expiresAt: new Date(Date.now() + 60 * 1000),
+        expiresAt: new Date(Date.now() + 120 * 1000),
       },
     });
 
