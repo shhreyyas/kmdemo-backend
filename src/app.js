@@ -15,6 +15,9 @@ app.use("/api/license", licenseRoutes);
 const authRoutes = require("./routes/authRoutes");
 app.use("/api/auth", authRoutes);
 
+const businessRoutes = require("./routes/businessRoutes");
+app.use("/api/business", businessRoutes);
+
 // Test Route
 app.get("/", (req, res) => {
   res.send("Catering API Running");

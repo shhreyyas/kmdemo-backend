@@ -227,12 +227,51 @@ exports.verifyOtp = async (req, res) => {
     });
 
     // Verify user
-    await prisma.user.update({
+    const updatedUser = await prisma.user.update({
       where: { email },
       data: { isVerified: true },
     });
 
-    return successResponse(res, "OTP verified successfully", null, 200);
+    const license = await prisma.licenseCode.findUnique({
+      where: { code: updatedUser.licenseCode },
+    });
+
+    const token = jwt.sign(
+      { userId: updatedUser.id, businessId: updatedUser.businessId },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" },
+    );
+
+    const formattedUser = {
+      id: updatedUser.id,
+      name: updatedUser.name,
+      email: updatedUser.email,
+      contact: updatedUser.phoneNumber,
+      status: 1,
+      user_type: 1,
+      subscription_type: license ? license.purchasePlan : null,
+      subscription_active: license
+        ? license.isActive && new Date() <= license.subscriptionEnd
+        : false,
+      license_code: updatedUser.licenseCode,
+      business_name: updatedUser.businessName,
+      email_verified_at: updatedUser.updatedAt,
+      device_type: null,
+      fcm_token: null,
+      created_at: updatedUser.createdAt,
+      updated_at: updatedUser.updatedAt,
+      deleted_at: updatedUser.deletedAt,
+    };
+
+    return successResponse(
+      res,
+      "OTP verified successfully",
+      {
+        token,
+        user: formattedUser,
+      },
+      200,
+    );
   } catch (error) {
     console.error("Verify OTP error:", error.message);
     return errorResponse(res, "Server error", 500);

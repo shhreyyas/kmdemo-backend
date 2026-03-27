@@ -27,10 +27,26 @@ model LicenseCode {
 }
 
 model Business {
-  id        String   @id @default(uuid())
-  name      String?
-  createdAt DateTime @default(now())
-  users     User[]
+  id                String   @id @default(uuid())
+  name              String?
+  ownerName         String?
+  contactPerson     String?
+  contactNumber     String?
+  email             String?
+  address           String?
+  businessType      String[]
+  yearsExperience   Int?
+  registrationNumber String?
+  gstNumber         String?
+  logoUrl           String?
+
+  isProfileCompleted Boolean @default(false)
+
+  createdAt         DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
+
+
+  users             User[]
 }
 
 model User {
