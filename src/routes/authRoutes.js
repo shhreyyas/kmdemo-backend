@@ -7,7 +7,7 @@ const {
   resendOtp,
   forgotPassword,
   verifyForgotOtp,
-  resetPassword,
+  newPassword,
   resendForgotOtp,
   deleteUser,
 } = require("../controllers/authController");
@@ -19,7 +19,7 @@ router.post("/resend-otp", resendOtp);
 router.post("/forgot-password", forgotPassword);
 router.post("/verify-forgot-otp", verifyForgotOtp);
 router.post("/resend-forgot-otp", resendForgotOtp);
-router.post("/reset-password", resetPassword);
+router.post("/new-password", newPassword);
 router.post("/delete-user", deleteUser);
 
 module.exports = router;

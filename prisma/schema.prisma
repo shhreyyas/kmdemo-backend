@@ -7,69 +7,77 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model LicenseCode {
-  id               String   @id @default(uuid())
-  code             String   @unique
-  businessName     String
-  prefix           String
-  sequence         Int
+model ServiceType {
+  id     Int    @id @default(autoincrement())
+  name   String
+  slug   String @unique
+  icon   String?
+  status Int    @default(1)
 
-  purchasePlan     Int      // months (1,3,6,12)
-  subscriptionStart DateTime
-  subscriptionEnd   DateTime
-  isActive         Boolean  @default(true)
+  businesses BusinessServiceType[]
+}
 
-  isUsed           Boolean  @default(false)
-  usedByUserId     String?
-  usedAt           DateTime?
+model BusinessServiceType {
+  businessId    String
+  serviceTypeId Int
+  business      Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  serviceType   ServiceType @relation(fields: [serviceTypeId], references: [id], onDelete: Cascade)
 
-  createdAt        DateTime @default(now())
+  @@id([businessId, serviceTypeId])
 }
 
 model Business {
-  id                String   @id @default(uuid())
-  name              String?
-  ownerName         String?
-  contactPerson     String?
-  contactNumber     String?
-  email             String?
-  address           String?
-  businessType      String[]
-  yearsExperience   Int?
-  registrationNumber String?
-  gstNumber         String?
-  logoUrl           String?
+  id                   String   @id @default(uuid())
+  name                 String?
+  ownerName            String?
+  sameAsOwnerNumber    Boolean  @default(false)
+  contactNumber        String?
+  email                String?
+  address              String?
+  cateringTypes        String[] @default([])
+  yearsExperience      Int?
+  registrationNumber   String?
+  gstNumber            String?
+  logoUrl              String?
+
+  subscriptionStatus String? @default("trial")
+  subscriptionPlan     String? @default("FREE")
+  subscriptionStart    DateTime?
+  subscriptionEnd      DateTime?
+  isTrialUsed          Boolean @default(false)
+
+  createdByUserId String?
+  createdBy       User?   @relation("BusinessCreatedBy", fields: [createdByUserId], references: [id])
 
   isProfileCompleted Boolean @default(false)
 
-  createdAt         DateTime @default(now())
-  updatedAt DateTime @updatedAt @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-
-  users             User[]
+  users        User[]
+  serviceLinks BusinessServiceType[]
 }
 
 model User {
-  id           String   @id @default(uuid())
-  businessId   String
-  // Store the license info used by this user for quick reads.
-  // (Business name is also stored redundantly for easy API response.)
-  licenseCode String
-  businessName String
-  name         String
-  email        String   @unique
-  passwordHash String
-  phoneNumber  String?
-  role         String   @default("owner")
-  isVerified   Boolean  @default(false)
+  id                 String    @id @default(uuid())
+  businessId         String?
+  name               String
+  email              String    @unique
+  passwordHash       String
+  phoneNumber        String?
+  role               String    @default("owner")
+  isVerified         Boolean   @default(false)
+  notificationStatus Int       @default(1)
+  userVerifiedAt     DateTime?
 
-  deletedAt    DateTime?
+  deletedAt DateTime?
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  business     Business @relation(fields: [businessId], references: [id])
-  devices      UserDevice[]
+  business          Business? @relation(fields: [businessId], references: [id])
+  devices           UserDevice[]
+  businessesCreated Business[] @relation("BusinessCreatedBy")
 }
 
 model UserDevice {
@@ -79,7 +87,7 @@ model UserDevice {
   fcmToken   String?
   createdAt  DateTime @default(now())
 
-  user       User @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id])
 }
 
 model OtpCode {

@@ -1,17 +1,25 @@
 exports.successResponse = (res, message, data = null, statusCode = 200) => {
   return res.status(statusCode).json({
-    message,
-    status_code: statusCode,
     success: true,
+    message,
     data,
   });
 };
 
-exports.errorResponse = (res, message, statusCode = 400) => {
+exports.errorResponse = (
+  res,
+  message,
+  statusCode = 200,
+  errorCode = "ERROR",
+  detailMessage,
+) => {
+  const errMsg = detailMessage !== undefined ? detailMessage : message;
   return res.status(statusCode).json({
-    message,
-    status_code: statusCode,
     success: false,
-    data: null,
+    message,
+    error: {
+      code: errorCode,
+      message: errMsg,
+    },
   });
 };

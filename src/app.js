@@ -8,15 +8,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Routes
-const licenseRoutes = require("./routes/licenseRoutes");
-app.use("/api/license", licenseRoutes);
-
+// Routes (see test.md — paths under /api)
 const authRoutes = require("./routes/authRoutes");
-app.use("/api/auth", authRoutes);
+app.use("/api", authRoutes);
 
 const businessRoutes = require("./routes/businessRoutes");
-app.use("/api/business", businessRoutes);
+app.use("/api", businessRoutes);
 
 // Test Route
 app.get("/", (req, res) => {

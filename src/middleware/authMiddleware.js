@@ -5,7 +5,7 @@ module.exports = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
 
   if (!token) {
-    return errorResponse(res, "Unauthorized", 401);
+    return errorResponse(res, "Missing or invalid auth token", 401, "UNAUTHORIZED");
   }
 
   try {
@@ -13,6 +13,6 @@ module.exports = (req, res, next) => {
     req.user = decoded;
     next();
   } catch (err) {
-    return errorResponse(res, "Invalid token", 401);
+    return errorResponse(res, "Missing or invalid auth token", 401, "UNAUTHORIZED");
   }
 };

@@ -9,33 +9,104 @@ const validatePassword = (password) => {
   return regex.test(password);
 };
 
+/** 1 if a non-empty fcm_token is provided, otherwise 0 */
+function notificationStatusFromFcmToken(fcm_token) {
+  return fcm_token != null && String(fcm_token).trim() !== "" ? 1 : 0;
+}
+
+async function upsertUserDevice(userId, deviceType, fcmToken) {
+  if (deviceType === undefined) return;
+  const existing = await prisma.userDevice.findFirst({
+    where: { userId, deviceType },
+  });
+  if (existing) {
+    await prisma.userDevice.update({
+      where: { id: existing.id },
+      data: { fcmToken: fcmToken ?? null },
+    });
+  } else {
+    await prisma.userDevice.create({
+      data: {
+        userId,
+        deviceType,
+        fcmToken: fcmToken ?? null,
+      },
+    });
+  }
+}
+
+function formatBusinessDetail(business) {
+  const service_types = (business.serviceLinks || []).map(
+    (l) => l.serviceType.slug,
+  );
+  return {
+    id: business.id,
+    business_logo: business.logoUrl,
+    business_name: business.name,
+    business_owner_name: business.ownerName,
+    same_as_owner_number: business.sameAsOwnerNumber,
+    contact_number: business.contactNumber,
+    business_email: business.email ?? "",
+    business_address: business.address,
+    service_types,
+    catering_types: business.cateringTypes || [],
+    years_of_experience: business.yearsExperience,
+    business_register_number: business.registrationNumber ?? "",
+    gst_number: business.gstNumber ?? "",
+    subscription: {
+      status: business.subscriptionStatus ?? "trial",
+      plan: business.subscriptionPlan ?? "FREE",
+      start: business.subscriptionStart?.toISOString() ?? null,
+      end: business.subscriptionEnd?.toISOString() ?? null,
+    },
+    is_trial_used: business.isTrialUsed,
+  };
+}
+
+async function loadBusinessDetailsArray(businessId) {
+  if (!businessId) return [];
+  const business = await prisma.business.findUnique({
+    where: { id: businessId },
+    include: {
+      serviceLinks: { include: { serviceType: true } },
+    },
+  });
+  if (!business) return [];
+  return [formatBusinessDetail(business)];
+}
+
 exports.signup = async (req, res) => {
   try {
     const {
       name,
       email,
+      contact,
       password,
-      license_code,
       device_type,
       fcm_token,
-      phone_number,
     } = req.body;
 
     if (
       !name ||
       !email ||
       !password ||
-      !license_code ||
+      !contact ||
       device_type === undefined
     ) {
-      return errorResponse(res, "Required fields missing", 400);
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
     if (!validatePassword(password)) {
       return errorResponse(
         res,
         "Password must be 8 characters, include 1 uppercase, 1 number and 1 special character",
-        400,
+        200,
+        "VALIDATION_ERROR",
       );
     }
 
@@ -44,74 +115,35 @@ exports.signup = async (req, res) => {
     });
 
     if (existingUser) {
-      return errorResponse(res, "Email already registered", 400);
+      return errorResponse(
+        res,
+        "User registration failed.",
+        200,
+        "USER_EXISTS",
+        "Email already registered.",
+      );
     }
 
-    const license = await prisma.licenseCode.findUnique({
-      where: { code: license_code },
-    });
-
-    if (!license) {
-      return errorResponse(res, "Invalid license code", 400);
-    }
-
-    if (license.isUsed) {
-      return errorResponse(res, "License already used", 400);
-    }
-
-    if (!license.isActive) {
-      return errorResponse(res, "License is inactive", 400);
-    }
-
-    if (new Date() > license.subscriptionEnd) {
-      return errorResponse(res, "License subscription expired", 400);
-    }
-
-    // Lowering bcrypt rounds to reduce signup latency.
-    // (Security vs speed trade-off.)
     const hashedPassword = await bcrypt.hash(password, 8);
 
-    const business = await prisma.business.create({
-      data: {
-        name: license.businessName,
-      },
-    });
+    const notificationStatus = notificationStatusFromFcmToken(fcm_token);
 
     const user = await prisma.user.create({
       data: {
         name,
         email,
         passwordHash: hashedPassword,
-        phoneNumber: phone_number || null,
-        businessId: business.id,
+        phoneNumber: contact,
+        businessId: null,
+        notificationStatus,
       },
     });
 
-    // Persist and update independent tables in parallel to reduce latency.
-    await Promise.all([
-      // Persist license/business snapshot on the user record.
-      // Using raw SQL here avoids Prisma input-schema issues for this field write.
-      prisma.$executeRaw`
-        UPDATE "User"
-        SET "licenseCode" = ${license.code},
-            "businessName" = ${license.businessName}
-        WHERE "id" = ${user.id}
-      `,
+    await upsertUserDevice(user.id, device_type, fcm_token);
 
-      prisma.licenseCode.update({
-        where: { code: license_code },
-        data: {
-          isUsed: true,
-          usedByUserId: user.id,
-          usedAt: new Date(),
-        },
-      }),
-
-      // Remove old OTPs
-      prisma.otpCode.deleteMany({
-        where: { email, type: "signup" },
-      }),
-    ]);
+    await prisma.otpCode.deleteMany({
+      where: { email, type: "signup" },
+    });
 
     const otp = Math.floor(100000 + 900000 * Math.random()).toString();
 
@@ -124,15 +156,12 @@ exports.signup = async (req, res) => {
       },
     });
 
-    // Send OTP email in background so signup response isn't blocked by SMTP latency.
     sendOtpEmail(email, otp, "signup").catch((emailErr) => {
       console.error("Signup OTP email failed:", emailErr.message);
-      // Don't fail registration; user is already created
     });
 
-    // Generate JWT token
     const token = jwt.sign(
-      { userId: user.id, businessId: business.id },
+      { userId: user.id, businessId: null },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
@@ -144,18 +173,14 @@ exports.signup = async (req, res) => {
       contact: user.phoneNumber,
       profile_pic: null,
       status: user.isVerified ? 1 : 0,
-      user_type: 1, // owner
-      subscription_type: license.purchasePlan,
-      // Snapshot of the license and business associated with this user.
-      subscription_active: license.isActive && new Date() <= license.subscriptionEnd,
-      license_code: license.code,
-      business_name: license.businessName,
-      email_verified_at: user.isVerified ? user.updatedAt : null,
+      user_type: 1,
+      notification_status: notificationStatus,
+      email_verified_at: null,
       device_type,
       fcm_token: fcm_token || null,
       created_at: user.createdAt,
       updated_at: user.updatedAt,
-      deleted_at: null,
+      deleted_at: user.deletedAt,
     };
 
     return res.status(200).json({
@@ -168,7 +193,7 @@ exports.signup = async (req, res) => {
     });
   } catch (error) {
     console.error("Signup error:", error.message);
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
 
@@ -177,7 +202,12 @@ exports.verifyOtp = async (req, res) => {
     const { email, otp } = req.body;
 
     if (!email || !otp) {
-      return errorResponse(res, "Email and OTP are required", 400);
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
     const user = await prisma.user.findUnique({
@@ -185,7 +215,7 @@ exports.verifyOtp = async (req, res) => {
     });
 
     if (!user) {
-      return errorResponse(res, "User not found", 404);
+      return errorResponse(res, "No account found for the given email", 404, "USER_NOT_FOUND");
     }
 
     const existingOtp = await prisma.otpCode.findFirst({
@@ -200,15 +230,15 @@ exports.verifyOtp = async (req, res) => {
     });
 
     if (!existingOtp) {
-      return errorResponse(res, "Invalid OTP", 400);
+      return errorResponse(res, "OTP is incorrect or has expired", 200, "INVALID_OTP");
     }
 
     if (existingOtp.attempts >= 5) {
-      return errorResponse(res, "Maximum OTP attempts exceeded", 400);
+      return errorResponse(res, "OTP is incorrect or has expired", 200, "INVALID_OTP");
     }
 
     if (new Date() > existingOtp.expiresAt) {
-      return errorResponse(res, "OTP expired", 400);
+      return errorResponse(res, "OTP is incorrect or has expired", 200, "INVALID_OTP");
     }
 
     if (existingOtp.otp !== otp) {
@@ -217,23 +247,18 @@ exports.verifyOtp = async (req, res) => {
         data: { attempts: existingOtp.attempts + 1 },
       });
 
-      return errorResponse(res, "Invalid OTP", 400);
+      return errorResponse(res, "OTP is incorrect or has expired", 200, "INVALID_OTP");
     }
 
-    // Mark OTP used
     await prisma.otpCode.update({
       where: { id: existingOtp.id },
       data: { isUsed: true },
     });
 
-    // Verify user
+    const verifiedAt = new Date();
     const updatedUser = await prisma.user.update({
       where: { email },
-      data: { isVerified: true },
-    });
-
-    const license = await prisma.licenseCode.findUnique({
-      where: { code: updatedUser.licenseCode },
+      data: { isVerified: true, userVerifiedAt: verifiedAt },
     });
 
     const token = jwt.sign(
@@ -242,22 +267,23 @@ exports.verifyOtp = async (req, res) => {
       { expiresIn: "7d" },
     );
 
+    const device = await prisma.userDevice.findFirst({
+      where: { userId: updatedUser.id },
+      orderBy: { createdAt: "desc" },
+    });
+
     const formattedUser = {
       id: updatedUser.id,
       name: updatedUser.name,
       email: updatedUser.email,
       contact: updatedUser.phoneNumber,
+      profile_pic: null,
       status: 1,
       user_type: 1,
-      subscription_type: license ? license.purchasePlan : null,
-      subscription_active: license
-        ? license.isActive && new Date() <= license.subscriptionEnd
-        : false,
-      license_code: updatedUser.licenseCode,
-      business_name: updatedUser.businessName,
-      email_verified_at: updatedUser.updatedAt,
-      device_type: null,
-      fcm_token: null,
+      notification_status: updatedUser.notificationStatus,
+      user_verified_at: verifiedAt.toISOString(),
+      device_type: device?.deviceType ?? null,
+      fcm_token: device?.fcmToken ?? null,
       created_at: updatedUser.createdAt,
       updated_at: updatedUser.updatedAt,
       deleted_at: updatedUser.deletedAt,
@@ -274,16 +300,21 @@ exports.verifyOtp = async (req, res) => {
     );
   } catch (error) {
     console.error("Verify OTP error:", error.message);
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
 
 exports.signIn = async (req, res) => {
   try {
-    const { email, password, license_code, device_type, fcm_token } = req.body;
+    const { email, password, device_type, fcm_token } = req.body;
 
-    if (!email || !password || !license_code || device_type === undefined) {
-      return errorResponse(res, "Required fields missing", 400);
+    if (!email || !password || device_type === undefined) {
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
     const user = await prisma.user.findUnique({
@@ -291,36 +322,24 @@ exports.signIn = async (req, res) => {
     });
 
     if (!user) {
-      return errorResponse(res, "Invalid credentials", 400);
+      return errorResponse(
+        res,
+        "Email or password is incorrect",
+        200,
+        "INVALID_CREDENTIALS",
+      );
     }
 
     const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
-      return errorResponse(res, "Invalid credentials", 400);
+      return errorResponse(
+        res,
+        "Email or password is incorrect",
+        200,
+        "INVALID_CREDENTIALS",
+      );
     }
 
-    // Validate license
-    const license = await prisma.licenseCode.findUnique({
-      where: { code: license_code },
-    });
-
-    if (!license) {
-      return errorResponse(res, "Invalid license code", 400);
-    }
-
-    if (license.usedByUserId !== user.id) {
-      return errorResponse(res, "License does not belong to this user", 400);
-    }
-
-    if (!license.isActive) {
-      return errorResponse(res, "License inactive", 400);
-    }
-
-    if (new Date() > license.subscriptionEnd) {
-      return errorResponse(res, "Subscription expired", 400);
-    }
-
-    // If not verified → resend OTP
     if (!user.isVerified) {
       await prisma.otpCode.deleteMany({
         where: { email, type: "signup" },
@@ -337,15 +356,23 @@ exports.signIn = async (req, res) => {
         },
       });
 
-      console.log("Login OTP:", otp);
       sendOtpEmail(email, otp, "signup").catch((emailErr) => {
         console.error("Login OTP email failed:", emailErr.message);
       });
+
       const token = jwt.sign(
         { userId: user.id, businessId: user.businessId },
         process.env.JWT_SECRET,
         { expiresIn: "7d" },
       );
+
+      await upsertUserDevice(user.id, device_type, fcm_token);
+
+      const notificationStatus = notificationStatusFromFcmToken(fcm_token);
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { notificationStatus },
+      });
 
       const formattedUser = {
         id: user.id,
@@ -353,14 +380,11 @@ exports.signIn = async (req, res) => {
         email: user.email,
         contact: user.phoneNumber,
         status: 1,
-        user_type: 1,
-        subscription_type: license.purchasePlan,
-        subscription_active: license.isActive && new Date() <= license.subscriptionEnd,
-        license_code: license.code,
-        business_name: license.businessName,
-        email_verified_at: null,
+        notification_status: notificationStatus,
+        user_verified_at: user.userVerifiedAt?.toISOString() ?? null,
         device_type,
         fcm_token: fcm_token || null,
+        business_details: await loadBusinessDetailsArray(user.businessId),
         created_at: user.createdAt,
         updated_at: user.updatedAt,
         deleted_at: user.deletedAt,
@@ -376,11 +400,21 @@ exports.signIn = async (req, res) => {
       });
     }
 
+    await upsertUserDevice(user.id, device_type, fcm_token);
+
+    const notificationStatus = notificationStatusFromFcmToken(fcm_token);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { notificationStatus },
+    });
+
     const token = jwt.sign(
       { userId: user.id, businessId: user.businessId },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
+
+    const business_details = await loadBusinessDetailsArray(user.businessId);
 
     const formattedUser = {
       id: user.id,
@@ -388,14 +422,11 @@ exports.signIn = async (req, res) => {
       email: user.email,
       contact: user.phoneNumber,
       status: 1,
-      user_type: 1,
-      subscription_type: license.purchasePlan,
-      subscription_active: license.isActive && new Date() <= license.subscriptionEnd,
-      license_code: license.code,
-      business_name: license.businessName,
-      email_verified_at: user.isVerified ? user.updatedAt : null,
+      notification_status: notificationStatus,
+      user_verified_at: user.userVerifiedAt?.toISOString() ?? null,
       device_type,
       fcm_token: fcm_token || null,
+      business_details,
       created_at: user.createdAt,
       updated_at: user.updatedAt,
       deleted_at: user.deletedAt,
@@ -411,7 +442,7 @@ exports.signIn = async (req, res) => {
     });
   } catch (error) {
     console.error("Login error:", error.message);
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
 
@@ -420,7 +451,12 @@ exports.resendOtp = async (req, res) => {
     const { email } = req.body;
 
     if (!email) {
-      return errorResponse(res, "Email is required", 400);
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
     const user = await prisma.user.findUnique({
@@ -428,7 +464,7 @@ exports.resendOtp = async (req, res) => {
     });
 
     if (!user) {
-      return errorResponse(res, "User not found", 404);
+      return errorResponse(res, "No account found for the given email", 404, "USER_NOT_FOUND");
     }
 
     await prisma.otpCode.deleteMany({
@@ -453,7 +489,7 @@ exports.resendOtp = async (req, res) => {
     return successResponse(res, "OTP resent successfully", null, 200);
   } catch (error) {
     console.error("Resend OTP error:", error.message);
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
 
@@ -462,7 +498,12 @@ exports.forgotPassword = async (req, res) => {
     const { email } = req.body;
 
     if (!email) {
-      return errorResponse(res, "Email is required", 400);
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
     const user = await prisma.user.findUnique({
@@ -470,7 +511,7 @@ exports.forgotPassword = async (req, res) => {
     });
 
     if (!user) {
-      return errorResponse(res, "User not found", 404);
+      return errorResponse(res, "No account found for the given email", 404, "USER_NOT_FOUND");
     }
 
     await prisma.otpCode.deleteMany({
@@ -494,7 +535,7 @@ exports.forgotPassword = async (req, res) => {
 
     return successResponse(res, "OTP sent to email", null, 200);
   } catch (error) {
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
 
@@ -502,21 +543,30 @@ exports.verifyForgotOtp = async (req, res) => {
   try {
     const { email, otp } = req.body;
 
+    if (!email || !otp) {
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
     const existingOtp = await prisma.otpCode.findFirst({
       where: { email, type: "forgot", isUsed: false },
       orderBy: { createdAt: "desc" },
     });
 
     if (!existingOtp) {
-      return errorResponse(res, "OTP not found", 400);
+      return errorResponse(res, "OTP is incorrect or has expired", 200, "INVALID_OTP");
     }
 
     if (new Date() > existingOtp.expiresAt) {
-      return errorResponse(res, "OTP expired", 400);
+      return errorResponse(res, "OTP is incorrect or has expired", 200, "INVALID_OTP");
     }
 
     if (existingOtp.otp !== otp) {
-      return errorResponse(res, "Invalid OTP", 400);
+      return errorResponse(res, "OTP is incorrect or has expired", 200, "INVALID_OTP");
     }
 
     await prisma.otpCode.update({
@@ -526,7 +576,7 @@ exports.verifyForgotOtp = async (req, res) => {
 
     return successResponse(res, "OTP verified", null, 200);
   } catch (error) {
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
 
@@ -535,7 +585,12 @@ exports.resendForgotOtp = async (req, res) => {
     const { email } = req.body;
 
     if (!email) {
-      return errorResponse(res, "Email is required", 400);
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
     const user = await prisma.user.findUnique({
@@ -543,10 +598,9 @@ exports.resendForgotOtp = async (req, res) => {
     });
 
     if (!user) {
-      return errorResponse(res, "User not found", 404);
+      return errorResponse(res, "No account found for the given email", 404, "USER_NOT_FOUND");
     }
 
-    // Delete previous forgot OTPs
     await prisma.otpCode.deleteMany({
       where: {
         email,
@@ -572,33 +626,59 @@ exports.resendForgotOtp = async (req, res) => {
     return successResponse(res, "OTP resent successfully", null, 200);
   } catch (error) {
     console.error("Resend forgot OTP error:", error.message);
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
 
-exports.resetPassword = async (req, res) => {
+exports.newPassword = async (req, res) => {
   try {
-    const { email, new_password } = req.body;
+    const { email, password, password_confirmation } = req.body;
 
-    if (!email || !new_password) {
-      return errorResponse(res, "Required fields missing", 400);
+    if (!email || !password || !password_confirmation) {
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
-    const hashedPassword = await bcrypt.hash(new_password, 8);
+    if (password !== password_confirmation) {
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    if (!validatePassword(password)) {
+      return errorResponse(
+        res,
+        "Password must be 8 characters, include 1 uppercase, 1 number and 1 special character",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (!existing) {
+      return errorResponse(res, "No account found for the given email", 404, "USER_NOT_FOUND");
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 8);
 
     await prisma.user.update({
       where: { email },
       data: { passwordHash: hashedPassword },
     });
 
-    return successResponse(res, "Password reset successful", null, 200);
+    return successResponse(res, "Password reset successfully", null, 200);
   } catch (error) {
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
 
-// Delete user (hard delete) using JWT auth token.
-// Expects: Authorization: Bearer <token>
 exports.deleteUser = async (req, res) => {
   try {
     const authHeader = req.headers.authorization || "";
@@ -606,54 +686,50 @@ exports.deleteUser = async (req, res) => {
       authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
     if (!token) {
-      return errorResponse(res, "Auth token missing", 401);
+      return errorResponse(res, "Missing or invalid auth token", 401, "UNAUTHORIZED");
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const userId = decoded.userId;
 
     if (!userId) {
-      return errorResponse(res, "Invalid token", 401);
+      return errorResponse(res, "Missing or invalid auth token", 401, "UNAUTHORIZED");
     }
 
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
-      return errorResponse(res, "User not found", 404);
+      return errorResponse(res, "No account found for the given email", 404, "USER_NOT_FOUND");
     }
 
-    // Hard delete: remove the user row so the same email can be reused.
-    // Also release any license keys assigned to this user and remove OTPs for that email.
     const businessId = user.businessId;
 
     await prisma.$transaction([
-      prisma.licenseCode.updateMany({
-        where: { usedByUserId: userId },
-        data: {
-          isUsed: false,
-          usedByUserId: null,
-          usedAt: null,
-        },
-      }),
       prisma.otpCode.deleteMany({
         where: { email: user.email },
+      }),
+      prisma.userDevice.deleteMany({
+        where: { userId },
       }),
       prisma.user.delete({
         where: { id: userId },
       }),
     ]);
 
-    // Cleanup: if this business had no other users, remove it too.
-    const remainingUsers = await prisma.user.count({
-      where: { businessId },
-    });
+    if (businessId) {
+      const remainingUsers = await prisma.user.count({
+        where: { businessId },
+      });
 
-    if (remainingUsers === 0) {
-      await prisma.business.delete({ where: { id: businessId } });
+      if (remainingUsers === 0) {
+        await prisma.business.delete({ where: { id: businessId } });
+      }
     }
 
     return successResponse(res, "User deleted successfully", null, 200);
   } catch (error) {
     console.error("Delete user error:", error.message);
-    return errorResponse(res, "Server error", 500);
+    return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
+
+exports.formatBusinessDetail = formatBusinessDetail;
