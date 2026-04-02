@@ -56,6 +56,7 @@ model Business {
 
   users        User[]
   serviceLinks BusinessServiceType[]
+  menuItems    MenuItem[]
 }
 
 model User {
@@ -78,6 +79,7 @@ model User {
   business          Business? @relation(fields: [businessId], references: [id])
   devices           UserDevice[]
   businessesCreated Business[] @relation("BusinessCreatedBy")
+  menuItemsCreated  MenuItem[]
 }
 
 model UserDevice {
@@ -88,6 +90,50 @@ model UserDevice {
   createdAt  DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id])
+}
+
+model MenuItem {
+  /// Server-generated UUID; not accepted from clients on create.
+  id              String   @id @default(uuid())
+  name            String
+  description     String?  @db.Text
+  pricePerPerson  Decimal  @db.Decimal(12, 2)
+  category        String
+  foodType        String
+  businessId      String?
+  createdByUserId String?
+  /// false only when both businessId and createdByUserId are set; otherwise true (catalog / import).
+  isGlobal        Boolean  @default(false)
+  parentMenuId    String?
+  ingredients     Json     @default("[]")
+  imageUrl        String?
+
+  business    Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy   User?     @relation(fields: [createdByUserId], references: [id])
+  parentMenu  MenuItem? @relation("MenuItemLineage", fields: [parentMenuId], references: [id])
+  childCopies MenuItem[] @relation("MenuItemLineage")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([createdByUserId])
+  @@index([isGlobal])
+  @@index([parentMenuId])
+}
+
+/// Global menu categories (admin-managed). App lists active rows; menu items still store `category` as a string label.
+model MenuCategory {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
 }
 
 model OtpCode {

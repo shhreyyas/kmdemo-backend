@@ -115,13 +115,7 @@ exports.signup = async (req, res) => {
     });
 
     if (existingUser) {
-      return errorResponse(
-        res,
-        "User registration failed.",
-        200,
-        "USER_EXISTS",
-        "Email already registered.",
-      );
+      return errorResponse(res, "Email already registered.", 200, "USER_EXISTS");
     }
 
     const hashedPassword = await bcrypt.hash(password, 8);
@@ -161,7 +155,7 @@ exports.signup = async (req, res) => {
     });
 
     const token = jwt.sign(
-      { userId: user.id, businessId: null },
+      { userId: user.id, businessId: null, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
@@ -193,7 +187,14 @@ exports.signup = async (req, res) => {
     });
   } catch (error) {
     console.error("Signup error:", error.message);
-    return errorResponse(res, "Server error", 500, "ERROR");
+    if (error.code === "P2002") {
+      const target = error.meta?.target;
+      const fields = Array.isArray(target) ? target : target != null ? [target] : [];
+      if (fields.some((f) => String(f).toLowerCase().includes("email"))) {
+        return errorResponse(res, "Email already registered.", 200, "USER_EXISTS");
+      }
+    }
+    return errorResponse(res, "User registration failed.", 500, "ERROR");
   }
 };
 
@@ -262,7 +263,11 @@ exports.verifyOtp = async (req, res) => {
     });
 
     const token = jwt.sign(
-      { userId: updatedUser.id, businessId: updatedUser.businessId },
+      {
+        userId: updatedUser.id,
+        businessId: updatedUser.businessId,
+        role: updatedUser.role,
+      },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
@@ -361,7 +366,7 @@ exports.signIn = async (req, res) => {
       });
 
       const token = jwt.sign(
-        { userId: user.id, businessId: user.businessId },
+        { userId: user.id, businessId: user.businessId, role: user.role },
         process.env.JWT_SECRET,
         { expiresIn: "7d" },
       );
@@ -409,7 +414,7 @@ exports.signIn = async (req, res) => {
     });
 
     const token = jwt.sign(
-      { userId: user.id, businessId: user.businessId },
+      { userId: user.id, businessId: user.businessId, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );

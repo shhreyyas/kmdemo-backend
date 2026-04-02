@@ -1,9 +1,9 @@
-exports.successResponse = (res, message, data = null, statusCode = 200) => {
-  return res.status(statusCode).json({
-    success: true,
-    message,
-    data,
-  });
+exports.successResponse = (res, message, data = null, statusCode = 200, extras = undefined) => {
+  const body = { success: true, message, data };
+  if (extras != null && typeof extras === "object") {
+    Object.assign(body, extras);
+  }
+  return res.status(statusCode).json(body);
 };
 
 exports.errorResponse = (
