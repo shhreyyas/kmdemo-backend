@@ -4,6 +4,78 @@ const { successResponse, errorResponse } = require("../utils/response");
 
 const FOOD_TYPES = new Set(["veg", "non_veg"]);
 
+/** When MenuItem.category string does not match any MenuCategory row (legacy rows). */
+function slugFallbackFromStoredLabel(name) {
+  const s = String(name ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return s || "category";
+}
+
+/**
+ * DB column `MenuItem.category` may wrongly store a JSON string, e.g.
+ * `'{"name":"Biryani","slug":"biryani"}'`. Parse it so API returns clean `{ name, slug }`.
+ * Also unwraps double-encoded `name` (nested JSON string).
+ */
+function tryParseEmbeddedCategoryJson(stored) {
+  const s = String(stored ?? "").trim();
+  if (!s.startsWith("{")) return null;
+  try {
+    const p = JSON.parse(s);
+    if (!p || typeof p !== "object") return null;
+    let name = p.name != null ? String(p.name) : "";
+    let slug = p.slug != null ? String(p.slug) : "";
+    if (name.trim().startsWith("{")) {
+      const inner = tryParseEmbeddedCategoryJson(name);
+      if (inner) {
+        name = inner.name;
+        slug = inner.slug || slug;
+      }
+    }
+    name = name.trim();
+    slug = slug.trim();
+    if (name && slug) return { name, slug };
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Stable legacy form for rows that stored `category` as JSON.stringify({ name, slug }). */
+function categoryJsonBlob(catRow) {
+  return JSON.stringify({ name: catRow.name, slug: catRow.slug });
+}
+
+/** Persist plain slug (or unchanged label) instead of a JSON blob if the client sends embedded JSON. */
+function normalizeCategoryForStorage(categoryTrim) {
+  const embedded = tryParseEmbeddedCategoryJson(categoryTrim);
+  if (embedded != null) return embedded.slug;
+  return categoryTrim;
+}
+
+/** Loads active categories once; resolves stored DB string (slug or display name) to `{ name, slug }`. */
+async function createCategoryResolver() {
+  const cats = await prisma.menuCategory.findMany({
+    where: { isActive: true },
+    select: { name: true, slug: true },
+  });
+  const bySlug = new Map(cats.map((c) => [c.slug, c]));
+  const byNameLower = new Map(cats.map((c) => [c.name.toLowerCase(), c]));
+  return function resolveCategory(stored) {
+    const s = String(stored ?? "").trim();
+    if (s === "") {
+      return { name: "Other", slug: "other" };
+    }
+    const slugHit = bySlug.get(s);
+    if (slugHit) return { name: slugHit.name, slug: slugHit.slug };
+    const nameHit = byNameLower.get(s.toLowerCase());
+    if (nameHit) return { name: nameHit.name, slug: nameHit.slug };
+    return { name: s, slug: slugFallbackFromStoredLabel(s) };
+  };
+}
+
 /**
  * Stored as `isGlobal` on the row:
  * - `false` only when both business and creator are set → private user item.
@@ -69,19 +141,39 @@ function sumIngredientCosts(ingredients) {
   return sum;
 }
 
-function formatMenuItem(row, { includeFinancials = true } = {}) {
+function formatMenuItem(
+  row,
+  { includeFinancials = true, resolveCategory } = {},
+) {
   const ingredients = normalizeIngredients(row.ingredients);
   const price = Number(row.pricePerPerson);
   const estimated_cost = sumIngredientCosts(ingredients);
   const profit = price - estimated_cost;
   const profit_margin = price === 0 ? 0 : (profit / price) * 100;
 
+  const embedded = tryParseEmbeddedCategoryJson(row.category);
+  let category;
+  if (embedded != null && typeof resolveCategory === "function") {
+    const canonical = resolveCategory(embedded.slug);
+    category = {
+      name: embedded.name || canonical.name,
+      slug: canonical.slug || embedded.slug,
+    };
+  } else if (typeof resolveCategory === "function") {
+    category = resolveCategory(row.category);
+  } else {
+    category = {
+      name: row.category,
+      slug: slugFallbackFromStoredLabel(row.category),
+    };
+  }
+
   const base = {
     _id: row.id,
     name: row.name,
     description: row.description ?? null,
     price_per_person: price,
-    category: row.category,
+    category,
     food_type: row.foodType,
     business_id: row.businessId,
     created_by: row.createdByUserId,
@@ -208,7 +300,7 @@ exports.createMenuItem = async (req, res) => {
         name: name.trim(),
         description: resolvedDescription,
         pricePerPerson: new Prisma.Decimal(String(price)),
-        category: category.trim(),
+        category: normalizeCategoryForStorage(category.trim()),
         foodType: food_type,
         businessId,
         createdByUserId: userId,
@@ -219,10 +311,11 @@ exports.createMenuItem = async (req, res) => {
       },
     });
 
+    const resolveCategory = await createCategoryResolver();
     return successResponse(
       res,
       "Menu item created successfully",
-      formatMenuItem(created, { includeFinancials: false }),
+      formatMenuItem(created, { includeFinancials: false, resolveCategory }),
       201,
     );
   } catch (error) {
@@ -236,7 +329,7 @@ exports.listMenuItems = async (req, res) => {
     const userId = req.user.userId;
     const businessId = req.businessId;
 
-    const { category, food_type, search, q } = req.query;
+    const { category, categories, food_type, search, q, self_only } = req.query;
 
     const visibilityOr = [{ isGlobal: true }, { createdByUserId: userId }];
 
@@ -287,18 +380,64 @@ exports.listMenuItems = async (req, res) => {
 
     const skip = (page - 1) * perPage;
 
-    const categoryTrim =
+    const categoriesParam =
+      categories != null && String(categories).trim() !== ""
+        ? String(categories).trim()
+        : null;
+    const categoryLegacy =
       category != null && String(category).trim() !== ""
         ? String(category).trim()
         : null;
+
+    let categorySlugs = [];
+    if (categoriesParam != null) {
+      categorySlugs = categoriesParam
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } else if (categoryLegacy != null) {
+      categorySlugs = [categoryLegacy];
+    }
+
     const foodTypeTrim =
       food_type != null && String(food_type).trim() !== ""
         ? String(food_type).trim()
         : null;
 
+    const selfOnly =
+      String(self_only ?? "").toLowerCase() === "true" || self_only === "1";
+
     const filterAnd = [];
-    if (categoryTrim != null) {
-      filterAnd.push({ category: categoryTrim });
+    if (categorySlugs.length > 0) {
+      const orCategoryBranches = [];
+      for (const slug of categorySlugs) {
+        const catRow = await prisma.menuCategory.findFirst({
+          where: {
+            isActive: true,
+            OR: [
+              { slug },
+              { name: { equals: slug, mode: "insensitive" } },
+            ],
+          },
+        });
+        if (catRow) {
+          orCategoryBranches.push({
+            OR: [
+              { category: catRow.slug },
+              { category: catRow.name },
+              { category: categoryJsonBlob(catRow) },
+            ],
+          });
+        } else {
+          orCategoryBranches.push({ category: slug });
+        }
+      }
+      if (orCategoryBranches.length > 0) {
+        filterAnd.push({ OR: orCategoryBranches });
+      }
+    }
+    if (selfOnly) {
+      filterAnd.push({ createdByUserId: userId });
     }
     if (foodTypeTrim != null) {
       filterAnd.push({ foodType: foodTypeTrim });
@@ -340,8 +479,9 @@ exports.listMenuItems = async (req, res) => {
       take: perPage,
     });
 
+    const resolveCategory = await createCategoryResolver();
     const data = rows.map((row) =>
-      formatMenuItem(row, { includeFinancials: true }),
+      formatMenuItem(row, { includeFinancials: true, resolveCategory }),
     );
 
     return successResponse(res, "Menu items fetched successfully", data, 200, {
@@ -390,10 +530,11 @@ exports.getMenuItem = async (req, res) => {
       );
     }
 
+    const resolveCategory = await createCategoryResolver();
     return successResponse(
       res,
       "Menu item fetched successfully",
-      formatMenuItem(menu, { includeFinancials: true }),
+      formatMenuItem(menu, { includeFinancials: true, resolveCategory }),
       200,
     );
   } catch (error) {
@@ -482,7 +623,7 @@ exports.updateMenuItem = async (req, res) => {
           "category must be a non-empty string.",
         );
       }
-      updates.category = category.trim();
+      updates.category = normalizeCategoryForStorage(category.trim());
     }
     if (food_type !== undefined) {
       if (!FOOD_TYPES.has(food_type)) {
@@ -583,10 +724,11 @@ exports.updateMenuItem = async (req, res) => {
         },
       });
 
+      const resolveCategory = await createCategoryResolver();
       return successResponse(
         res,
         "Menu item updated successfully",
-        formatMenuItem(newItem, { includeFinancials: false }),
+        formatMenuItem(newItem, { includeFinancials: false, resolveCategory }),
         201,
       );
     }
@@ -596,10 +738,11 @@ exports.updateMenuItem = async (req, res) => {
       data: updates,
     });
 
+    const resolveCategoryUpdated = await createCategoryResolver();
     return successResponse(
       res,
       "Menu item updated successfully",
-      formatMenuItem(updated, { includeFinancials: false }),
+      formatMenuItem(updated, { includeFinancials: false, resolveCategory: resolveCategoryUpdated }),
       200,
     );
   } catch (error) {
