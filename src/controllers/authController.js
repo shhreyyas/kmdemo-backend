@@ -165,7 +165,7 @@ exports.signup = async (req, res) => {
       name: user.name,
       email: user.email,
       contact: user.phoneNumber,
-      profile_pic: null,
+      profile_pic: user.profileImageUrl ?? null,
       status: user.isVerified ? 1 : 0,
       user_type: 1,
       notification_status: notificationStatus,
@@ -282,7 +282,7 @@ exports.verifyOtp = async (req, res) => {
       name: updatedUser.name,
       email: updatedUser.email,
       contact: updatedUser.phoneNumber,
-      profile_pic: null,
+      profile_pic: updatedUser.profileImageUrl ?? null,
       status: 1,
       user_type: 1,
       notification_status: updatedUser.notificationStatus,
@@ -384,6 +384,7 @@ exports.signIn = async (req, res) => {
         name: user.name,
         email: user.email,
         contact: user.phoneNumber,
+        profile_pic: user.profileImageUrl ?? null,
         status: 1,
         notification_status: notificationStatus,
         user_verified_at: user.userVerifiedAt?.toISOString() ?? null,
@@ -426,6 +427,7 @@ exports.signIn = async (req, res) => {
       name: user.name,
       email: user.email,
       contact: user.phoneNumber,
+      profile_pic: user.profileImageUrl ?? null,
       status: 1,
       notification_status: notificationStatus,
       user_verified_at: user.userVerifiedAt?.toISOString() ?? null,
@@ -684,6 +686,90 @@ exports.newPassword = async (req, res) => {
   }
 };
 
+exports.updateUserProfile = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { name, contact, profile_pic } = req.body;
+
+    const data = {};
+    if (name !== undefined && String(name).trim()) {
+      data.name = String(name).trim();
+    }
+    if (contact !== undefined) {
+      const digits = String(contact).replace(/\D/g, "").slice(0, 10);
+      data.phoneNumber = digits || null;
+    }
+    if (profile_pic !== undefined) {
+      data.profileImageUrl =
+        profile_pic === null || profile_pic === ""
+          ? null
+          : String(profile_pic).trim();
+    }
+
+    if (Object.keys(data).length === 0) {
+      return errorResponse(
+        res,
+        "No fields to update",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data,
+    });
+
+    const device = await prisma.userDevice.findFirst({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const business_details = await loadBusinessDetailsArray(updated.businessId);
+
+    const token = jwt.sign(
+      {
+        userId: updated.id,
+        businessId: updated.businessId,
+        role: updated.role,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" },
+    );
+
+    const formattedUser = {
+      id: updated.id,
+      name: updated.name,
+      email: updated.email,
+      contact: updated.phoneNumber,
+      profile_pic: updated.profileImageUrl ?? null,
+      status: updated.isVerified ? 1 : 0,
+      user_type: 1,
+      notification_status: updated.notificationStatus,
+      user_verified_at: updated.userVerifiedAt?.toISOString() ?? null,
+      device_type: device?.deviceType ?? null,
+      fcm_token: device?.fcmToken ?? null,
+      business_details,
+      created_at: updated.createdAt,
+      updated_at: updated.updatedAt,
+      deleted_at: updated.deletedAt,
+    };
+
+    return successResponse(
+      res,
+      "Profile updated successfully",
+      {
+        token,
+        user: formattedUser,
+      },
+      200,
+    );
+  } catch (error) {
+    console.error("updateUserProfile error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
 exports.deleteUser = async (req, res) => {
   try {
     const authHeader = req.headers.authorization || "";
@@ -738,3 +824,4 @@ exports.deleteUser = async (req, res) => {
 };
 
 exports.formatBusinessDetail = formatBusinessDetail;
+exports.loadBusinessDetailsArray = loadBusinessDetailsArray;

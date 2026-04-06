@@ -18,66 +18,81 @@ function stripDataUrlBase64(raw) {
 }
 
 /**
+ * @param {string} subdir - folder under `uploads/` (e.g. `menu`, `profile`)
+ */
+function createBase64ImageHandler(subdir, logLabel) {
+  return async (req, res) => {
+    try {
+      const { base64, mime: mimeRaw } = req.body;
+      if (base64 == null || typeof base64 !== "string") {
+        return errorResponse(
+          res,
+          "base64 image data is required",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+
+      const b64 = stripDataUrlBase64(base64);
+      let mime =
+        typeof mimeRaw === "string" ? mimeRaw.trim().toLowerCase() : "image/jpeg";
+      if (!mime.startsWith("image/")) {
+        mime = "image/jpeg";
+      }
+
+      const ext = ALLOWED_MIME.get(mime);
+      if (!ext) {
+        return errorResponse(
+          res,
+          "Only JPEG, PNG, or WebP images are allowed",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+
+      let buffer;
+      try {
+        buffer = Buffer.from(b64, "base64");
+      } catch {
+        return errorResponse(res, "Invalid base64 data", 422, "VALIDATION_ERROR");
+      }
+
+      if (!buffer.length) {
+        return errorResponse(res, "Empty image data", 422, "VALIDATION_ERROR");
+      }
+      if (buffer.length > MAX_BYTES) {
+        return errorResponse(res, "Image must be 5MB or smaller", 422, "VALIDATION_ERROR");
+      }
+
+      const fileName = `${crypto.randomUUID()}.${ext}`;
+      const uploadDir = path.join(__dirname, "..", "..", "uploads", subdir);
+      await fs.mkdir(uploadDir, { recursive: true });
+      const filePath = path.join(uploadDir, fileName);
+      await fs.writeFile(filePath, buffer);
+
+      const publicBase =
+        process.env.PUBLIC_APP_URL?.replace(/\/$/, "") ||
+        `${req.protocol}://${req.get("host")}`;
+      const url = `${publicBase}/uploads/${subdir}/${fileName}`;
+
+      return successResponse(res, "Image uploaded successfully", { url }, 200);
+    } catch (error) {
+      console.error(`${logLabel} error:`, error.message);
+      return errorResponse(res, "Server error", 500, "ERROR");
+    }
+  };
+}
+
+/**
  * POST /api/v1/upload-menu-image
  * Body: { base64: string, mime?: string }
  * Auth + business context required (same as menu routes).
  */
-exports.uploadMenuImage = async (req, res) => {
-  try {
-    const { base64, mime: mimeRaw } = req.body;
-    if (base64 == null || typeof base64 !== "string") {
-      return errorResponse(
-        res,
-        "base64 image data is required",
-        422,
-        "VALIDATION_ERROR",
-      );
-    }
+exports.uploadMenuImage = createBase64ImageHandler("menu", "uploadMenuImage");
 
-    const b64 = stripDataUrlBase64(base64);
-    let mime = typeof mimeRaw === "string" ? mimeRaw.trim().toLowerCase() : "image/jpeg";
-    if (!mime.startsWith("image/")) {
-      mime = "image/jpeg";
-    }
-
-    const ext = ALLOWED_MIME.get(mime);
-    if (!ext) {
-      return errorResponse(
-        res,
-        "Only JPEG, PNG, or WebP images are allowed",
-        422,
-        "VALIDATION_ERROR",
-      );
-    }
-
-    let buffer;
-    try {
-      buffer = Buffer.from(b64, "base64");
-    } catch {
-      return errorResponse(res, "Invalid base64 data", 422, "VALIDATION_ERROR");
-    }
-
-    if (!buffer.length) {
-      return errorResponse(res, "Empty image data", 422, "VALIDATION_ERROR");
-    }
-    if (buffer.length > MAX_BYTES) {
-      return errorResponse(res, "Image must be 5MB or smaller", 422, "VALIDATION_ERROR");
-    }
-
-    const fileName = `${crypto.randomUUID()}.${ext}`;
-    const uploadDir = path.join(__dirname, "..", "..", "uploads", "menu");
-    await fs.mkdir(uploadDir, { recursive: true });
-    const filePath = path.join(uploadDir, fileName);
-    await fs.writeFile(filePath, buffer);
-
-    const publicBase =
-      process.env.PUBLIC_APP_URL?.replace(/\/$/, "") ||
-      `${req.protocol}://${req.get("host")}`;
-    const url = `${publicBase}/uploads/menu/${fileName}`;
-
-    return successResponse(res, "Image uploaded successfully", { url }, 200);
-  } catch (error) {
-    console.error("uploadMenuImage error:", error.message);
-    return errorResponse(res, "Server error", 500, "ERROR");
-  }
-};
+/**
+ * POST /api/v1/upload-profile-image
+ * Body: { base64: string, mime?: string }
+ * Auth only — user profile photos do not require a business.
+ */
+exports.uploadProfileImage = createBase64ImageHandler("profile", "uploadProfileImage");

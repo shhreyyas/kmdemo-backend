@@ -215,6 +215,7 @@ exports.registerBusiness = async (req, res) => {
       name: refreshed.name,
       email: refreshed.email,
       contact: refreshed.phoneNumber,
+      profile_pic: refreshed.profileImageUrl ?? null,
       status: 1,
       notification_status: refreshed.notificationStatus,
       user_verified_at: refreshed.userVerifiedAt?.toISOString() ?? null,
@@ -237,6 +238,120 @@ exports.registerBusiness = async (req, res) => {
     );
   } catch (error) {
     console.error("registerBusiness error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+exports.updateBusiness = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const businessId = req.businessId;
+
+    if (!businessId) {
+      return errorResponse(
+        res,
+        "No business context. Register a business first.",
+        400,
+        "NO_BUSINESS",
+      );
+    }
+
+    const {
+      business_logo,
+      gst_number,
+      business_address,
+      contact_number,
+      business_email,
+    } = req.body;
+
+    const data = {};
+    if (business_logo !== undefined) {
+      const v = String(business_logo).trim();
+      data.logoUrl = v || null;
+    }
+    if (gst_number !== undefined) {
+      data.gstNumber = String(gst_number).trim() || "";
+    }
+    if (business_address !== undefined) {
+      data.address = String(business_address).trim() || null;
+    }
+    if (contact_number !== undefined) {
+      const digits = String(contact_number).replace(/\D/g, "").slice(0, 10);
+      data.contactNumber = digits || null;
+    }
+    if (business_email !== undefined) {
+      data.email = String(business_email).trim() || "";
+    }
+
+    if (Object.keys(data).length === 0) {
+      return errorResponse(
+        res,
+        "No fields to update",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    await prisma.business.update({
+      where: { id: businessId },
+      data,
+    });
+
+    const fullBusiness = await prisma.business.findUnique({
+      where: { id: businessId },
+      include: {
+        serviceLinks: { include: { serviceType: true } },
+      },
+    });
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        devices: { orderBy: { createdAt: "desc" }, take: 1 },
+      },
+    });
+
+    if (!user || !fullBusiness) {
+      return errorResponse(res, "Not found", 404, "NOT_FOUND");
+    }
+
+    const token = jwt.sign(
+      { userId, businessId, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" },
+    );
+
+    const device = user.devices[0];
+    const business_details = [formatBusinessDetail(fullBusiness)];
+
+    const formattedUser = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      contact: user.phoneNumber,
+      profile_pic: user.profileImageUrl ?? null,
+      status: 1,
+      notification_status: user.notificationStatus,
+      user_verified_at: user.userVerifiedAt?.toISOString() ?? null,
+      device_type: device?.deviceType ?? null,
+      fcm_token: device?.fcmToken ?? null,
+      business_details,
+      created_at: user.createdAt,
+      updated_at: user.updatedAt,
+      deleted_at: user.deletedAt,
+    };
+
+    return successResponse(
+      res,
+      "Business profile updated successfully",
+      {
+        token,
+        user: formattedUser,
+      },
+      200,
+    );
+  } catch (error) {
+    console.error("updateBusiness error:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };

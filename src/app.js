@@ -26,6 +26,15 @@ app.use("/api", menuRoutes);
 const categoryRoutes = require("./routes/categoryRoutes");
 app.use("/api", categoryRoutes);
 
+const bookingRoutes = require("./routes/bookingRoutes");
+app.use("/api", bookingRoutes);
+
+const quotationRoutes = require("./routes/quotationRoutes");
+app.use("/api", quotationRoutes);
+
+const contactRoutes = require("./routes/contactRoutes");
+app.use("/api", contactRoutes);
+
 // Test Route
 app.get("/", (req, res) => {
   res.send("Catering API Running");
