@@ -7,53 +7,149 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model LicenseCode {
-  id               String   @id @default(uuid())
-  code             String   @unique
-  businessName     String
-  prefix           String
-  sequence         Int
+model ServiceType {
+  id     Int    @id @default(autoincrement())
+  name   String
+  slug   String @unique
+  icon   String?
+  status Int    @default(1)
 
-  purchasePlan     Int      // months (1,3,6,12)
-  subscriptionStart DateTime
-  subscriptionEnd   DateTime
-  isActive         Boolean  @default(true)
+  businesses BusinessServiceType[]
+}
 
-  isUsed           Boolean  @default(false)
-  usedByUserId     String?
-  usedAt           DateTime?
+model BusinessServiceType {
+  businessId    String
+  serviceTypeId Int
+  business      Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  serviceType   ServiceType @relation(fields: [serviceTypeId], references: [id], onDelete: Cascade)
 
-  createdAt        DateTime @default(now())
+  @@id([businessId, serviceTypeId])
 }
 
 model Business {
-  id        String   @id @default(uuid())
-  name      String?
+  id                   String   @id @default(uuid())
+  name                 String?
+  ownerName            String?
+  sameAsOwnerNumber    Boolean  @default(false)
+  contactNumber        String?
+  email                String?
+  address              String?
+  cateringTypes        String[] @default([])
+  yearsExperience      Int?
+  registrationNumber   String?
+  gstNumber            String?
+  logoUrl              String?
+
+  subscriptionStatus String? @default("trial")
+  subscriptionPlan     String? @default("FREE")
+  subscriptionStart    DateTime?
+  subscriptionEnd      DateTime?
+  isTrialUsed          Boolean @default(false)
+  razorpayCustomerId   String?
+
+  createdByUserId String?
+  createdBy       User?   @relation("BusinessCreatedBy", fields: [createdByUserId], references: [id])
+
+  isProfileCompleted Boolean @default(false)
+
   createdAt DateTime @default(now())
-  users     User[]
+  updatedAt DateTime @updatedAt
+
+  defaultServiceChargePct Decimal @default(10) @db.Decimal(5, 2)
+  defaultTaxPct           Decimal @default(5) @db.Decimal(5, 2)
+
+  users        User[]
+  serviceLinks BusinessServiceType[]
+  menuItems    MenuItem[]
+  bookings     Booking[]
+  quotations   Quotation[]
+  billingSubscriptions BillingSubscription[]
+  billingPaymentEvents BillingPaymentEvent[]
+}
+
+/// Mirrors Razorpay subscription; one row per active/historical app subscription.
+model BillingSubscription {
+  id                     String    @id @default(uuid())
+  businessId             String
+  business               Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  razorpaySubscriptionId String    @unique
+  razorpayPlanId         String
+  planCode               String?
+  status                 String
+  currentPeriodStart     DateTime?
+  currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean   @default(false)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  paymentEvents BillingPaymentEvent[]
+
+  @@index([businessId])
+}
+
+model BillingPaymentEvent {
+  id                      String               @id @default(uuid())
+  businessId              String
+  business                Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  billingSubscriptionId   String?
+  billingSubscription     BillingSubscription? @relation(fields: [billingSubscriptionId], references: [id], onDelete: SetNull)
+  razorpayPaymentId       String?              @unique
+  razorpayInvoiceId       String?
+  amountPaise             BigInt               @default(0)
+  status                  String
+  rawWebhookEventId       String?
+  createdAt               DateTime             @default(now())
+
+  @@index([businessId])
+  @@index([billingSubscriptionId])
+}
+
+/// Razorpay webhook dedupe + debugging (idempotent processing).
+model WebhookInbox {
+  id          String    @id @default(uuid())
+  eventId     String    @unique
+  payload     Json
+  processedAt DateTime?
+  error       String?
+  createdAt   DateTime  @default(now())
 }
 
 model User {
+  id                 String    @id @default(uuid())
+  businessId         String?
+  name               String
+  email              String    @unique
+  passwordHash       String
+  phoneNumber        String?
+  profileImageUrl    String?
+  role               String    @default("owner")
+  isVerified         Boolean   @default(false)
+  notificationStatus Int       @default(1)
+  userVerifiedAt     DateTime?
+
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business          Business? @relation(fields: [businessId], references: [id])
+  devices           UserDevice[]
+  businessesCreated Business[] @relation("BusinessCreatedBy")
+  menuItemsCreated  MenuItem[]
+  contactMessages   ContactMessage[]
+}
+
+model ContactMessage {
   id           String   @id @default(uuid())
-  businessId   String
-  // Store the license info used by this user for quick reads.
-  // (Business name is also stored redundantly for easy API response.)
-  licenseCode String
-  businessName String
-  name         String
-  email        String   @unique
-  passwordHash String
-  phoneNumber  String?
-  role         String   @default("owner")
-  isVerified   Boolean  @default(false)
-
-  deletedAt    DateTime?
-
+  email        String
+  customerName String
+  phone        String?
+  description  String
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
 
-  business     Business @relation(fields: [businessId], references: [id])
-  devices      UserDevice[]
+  @@index([createdAt])
 }
 
 model UserDevice {
@@ -63,7 +159,53 @@ model UserDevice {
   fcmToken   String?
   createdAt  DateTime @default(now())
 
-  user       User @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+}
+
+model MenuItem {
+  /// Server-generated UUID; not accepted from clients on create.
+  id              String   @id @default(uuid())
+  name            String
+  description     String?  @db.Text
+  pricePerPerson  Decimal  @db.Decimal(12, 2)
+  category        String
+  foodType        String
+  businessId      String?
+  createdByUserId String?
+  /// false only when both businessId and createdByUserId are set; otherwise true (catalog / import).
+  isGlobal        Boolean  @default(false)
+  parentMenuId    String?
+  ingredients     Json     @default("[]")
+  imageUrl        String?
+
+  business    Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy   User?     @relation(fields: [createdByUserId], references: [id])
+  parentMenu  MenuItem? @relation("MenuItemLineage", fields: [parentMenuId], references: [id])
+  childCopies MenuItem[] @relation("MenuItemLineage")
+  bookingMenuItems    BookingMenuItem[]
+  quotationMenuItems  QuotationMenuItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([createdByUserId])
+  @@index([isGlobal])
+  @@index([parentMenuId])
+}
+
+/// Global menu categories (admin-managed). App lists active rows; menu items still store `category` as a string label.
+model MenuCategory {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
 }
 
 model OtpCode {
@@ -77,4 +219,139 @@ model OtpCode {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+enum BookingStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PARTIAL
+  PAID
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  BANK_TRANSFER
+}
+
+enum QuotationStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+}
+
+model Booking {
+  id     String @id @default(uuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  status      BookingStatus @default(DRAFT)
+  stepNumber  Int           @default(1)
+  bookingCode String?
+
+  customerName  String?
+  customerPhone String?
+  customerEmail String?
+
+  eventAt       DateTime?
+  eventLocation String?
+  functionType  String?
+  guestCount    Int?
+  notes         String? @db.Text
+
+  discountAmount      Decimal @default(0) @db.Decimal(12, 2)
+  serviceChargePct    Decimal @default("10") @db.Decimal(5, 2)
+  taxPct              Decimal @default("5") @db.Decimal(5, 2)
+  subtotal            Decimal @default(0) @db.Decimal(12, 2)
+  serviceChargeAmount Decimal @default(0) @db.Decimal(12, 2)
+  taxAmount           Decimal @default(0) @db.Decimal(12, 2)
+  totalDue            Decimal @default(0) @db.Decimal(12, 2)
+  amountPaid          Decimal @default(0) @db.Decimal(12, 2)
+  paymentStatus       PaymentStatus @default(PENDING)
+
+  menuItems BookingMenuItem[]
+  payments  PaymentTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, bookingCode])
+  @@index([businessId, status])
+  @@index([businessId, eventAt])
+}
+
+model BookingMenuItem {
+  id                    String  @id @default(uuid())
+  bookingId             String
+  menuItemId            String
+  quantity              Int     @default(1)
+  pricePerPlateSnapshot Decimal @db.Decimal(12, 2)
+  nameSnapshot          String?
+  imageUrlSnapshot      String?
+
+  booking  Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  menuItem MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+
+  @@unique([bookingId, menuItemId])
+  @@index([bookingId])
+}
+
+model PaymentTransaction {
+  id        String        @id @default(uuid())
+  bookingId String
+  amount    Decimal       @db.Decimal(12, 2)
+  method    PaymentMethod
+  createdAt DateTime      @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+model Quotation {
+  id     String @id @default(uuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  status QuotationStatus @default(SENT)
+
+  clientName  String
+  clientPhone String?
+  functionType String?
+  eventName   String
+  eventDate   DateTime?
+  guestCount  Int       @default(0)
+  discountAmount      Decimal @default(0) @db.Decimal(12, 2)
+  serviceChargePct    Decimal @default("10") @db.Decimal(5, 2)
+  taxPct              Decimal @default("5") @db.Decimal(5, 2)
+  subtotal            Decimal @db.Decimal(12, 2)
+  serviceChargeAmount Decimal @db.Decimal(12, 2)
+  taxAmount           Decimal @db.Decimal(12, 2)
+  total               Decimal @db.Decimal(12, 2)
+
+  menuItems QuotationMenuItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+}
+
+model QuotationMenuItem {
+  id                    String  @id @default(uuid())
+  quotationId           String
+  menuItemId            String
+  pricePerPlateSnapshot Decimal @db.Decimal(12, 2)
+  nameSnapshot          String?
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  menuItem  MenuItem  @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+
+  @@unique([quotationId, menuItemId])
+  @@index([quotationId])
 }

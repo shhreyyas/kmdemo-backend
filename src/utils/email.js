@@ -69,7 +69,7 @@ exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
                 <!-- Timer Notice -->
                 <div style="background-color:#FFF3CD; border-left: 4px solid #FFC107; border-radius:4px; padding:12px 20px; text-align:left; margin-bottom:20px;">
                   <p style="margin:0; color:#856404; font-size:13px;">
-                    ⏱️ <strong>This OTP is valid for 1 minute only.</strong> Please do not share it with anyone.
+                    ⏱️ <strong>This OTP is valid for 2 minutes only.</strong> Please do not share it with anyone.
                   </p>
                 </div>
 
@@ -96,6 +96,77 @@ exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
               </td>
             </tr>
 
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>
+  `;
+
+  await transporter.sendMail({
+    from: `"Catering App" <${process.env.EMAIL_USER}>`,
+    to: toEmail,
+    subject,
+    html: htmlTemplate,
+  });
+};
+
+/**
+ * @param {string} toEmail
+ * @param {{ bookingCode: string, eventAt: Date | null }} opts
+ */
+exports.sendBookingConfirmationEmail = async (toEmail, opts) => {
+  const code = opts.bookingCode || "";
+  let when = "your event";
+  if (opts.eventAt) {
+    try {
+      const d = new Date(opts.eventAt);
+      when = d.toLocaleString("en-IN", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      });
+    } catch {
+      when = String(opts.eventAt);
+    }
+  }
+  const subject = `Booking confirmed — ${code}`;
+  const htmlTemplate = `
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Booking Confirmed</title>
+  </head>
+  <body style="margin:0; padding:0; background-color:#f4f4f7; font-family: Arial, sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7; padding: 40px 0;">
+      <tr>
+        <td align="center">
+          <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:10px; overflow:hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
+            <tr>
+              <td style="background: linear-gradient(135deg, #FF6B35, #F7931E); padding: 40px 30px; text-align:center;">
+                <h1 style="margin:0; color:#ffffff; font-size:26px; letter-spacing:1px;">Catering App</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 40px 40px 20px 40px; text-align:center;">
+                <h2 style="margin:0 0 10px 0; color:#333333; font-size:22px;">Booking confirmed</h2>
+                <p style="margin:0 0 20px 0; color:#666666; font-size:15px; line-height:1.6;">
+                  Your booking for <strong>${when}</strong> has been successfully confirmed.
+                </p>
+                <p style="margin:0; color:#333333; font-size:16px;">
+                  Booking ID: <strong style="color:#FF6B35;">${code}</strong>
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 20px 40px 30px 40px; text-align:center;">
+                <p style="margin:0; color:#aaaaaa; font-size:12px;">
+                  © ${new Date().getFullYear()} Catering App
+                </p>
+              </td>
+            </tr>
           </table>
         </td>
       </tr>
