@@ -8,6 +8,15 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: "15mb" }));
+app.use(express.urlencoded({ extended: true, limit: "15mb" }));
+// Express 5: req.body stays undefined if Content-Type is not parsed or body is empty;
+// normalize so route handlers can destructure without throwing.
+app.use((req, _res, next) => {
+  if (req.body === undefined || req.body === null) {
+    req.body = {};
+  }
+  next();
+});
 app.use(
   "/uploads",
   express.static(path.join(__dirname, "..", "uploads")),
