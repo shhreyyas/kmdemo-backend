@@ -1,12 +1,13 @@
 const prisma = require("../config/prisma");
 const { successResponse, errorResponse } = require("../utils/response");
+const { sendContactInquiryEmail } = require("../utils/email");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * POST /api/contact-us
  * Body: { email, customer_name, phone, description }
- * Auth: required (JWT)
+ * Auth: not required
  */
 exports.submitContact = async (req, res) => {
   try {
@@ -57,13 +58,24 @@ exports.submitContact = async (req, res) => {
       );
     }
 
-    await prisma.contactMessage.create({
+    const createdMessage = await prisma.contactMessage.create({
       data: {
         email: emailTrim,
         customerName: nameTrim,
         phone: phoneDigits,
         description: descTrim,
         userId: userId ?? null,
+      },
+    });
+
+    await sendContactInquiryEmail({
+      toEmail: "info.katmitra@gmail.com",
+      inquiry: {
+        email: createdMessage.email,
+        customerName: createdMessage.customerName,
+        phone: createdMessage.phone,
+        description: createdMessage.description,
+        createdAt: createdMessage.createdAt,
       },
     });
 

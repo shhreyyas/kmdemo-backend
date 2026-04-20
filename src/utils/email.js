@@ -91,7 +91,7 @@ exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
               <td style="padding: 20px 40px 30px 40px; text-align:center;">
                 <p style="margin:0; color:#aaaaaa; font-size:12px;">
                   © ${new Date().getFullYear()} Catering App · All rights reserved<br/>
-                  Need help? <a href="mailto:support@cateringapp.com" style="color:#FF6B35; text-decoration:none;">Contact Support</a>
+                  Need help? <a href="mailto:info.katmitra@gmail.com" style="color:#FF6B35; text-decoration:none;">Contact Support</a>
                 </p>
               </td>
             </tr>
@@ -177,6 +177,70 @@ exports.sendBookingConfirmationEmail = async (toEmail, opts) => {
 
   await transporter.sendMail({
     from: `"Catering App" <${process.env.EMAIL_USER}>`,
+    to: toEmail,
+    subject,
+    html: htmlTemplate,
+  });
+};
+
+/**
+ * @param {{ toEmail: string, inquiry: { email: string, customerName: string, phone: string, description: string, createdAt?: Date|string } }} payload
+ */
+exports.sendContactInquiryEmail = async ({ toEmail, inquiry }) => {
+  const submittedAt = inquiry.createdAt
+    ? new Date(inquiry.createdAt).toLocaleString("en-IN", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })
+    : new Date().toLocaleString("en-IN", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      });
+
+  const subject = `New Contact Inquiry - ${inquiry.customerName}`;
+  const htmlTemplate = `
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>New Contact Inquiry</title>
+  </head>
+  <body style="margin:0; padding:0; background-color:#f4f4f7; font-family: Arial, sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7; padding: 28px 0;">
+      <tr>
+        <td align="center">
+          <table width="620" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:10px; overflow:hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.08);">
+            <tr>
+              <td style="background: linear-gradient(135deg, #F59E0B, #D97706); padding: 26px 24px; text-align:center;">
+                <h1 style="margin:0; color:#ffffff; font-size:24px;">New Contact Inquiry</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 28px 24px;">
+                <p style="margin:0 0 18px 0; color:#333333; font-size:15px;">A new inquiry has been submitted from the website contact form.</p>
+                <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse: collapse;">
+                  <tr><td style="padding:10px 0; border-bottom:1px solid #eeeeee; color:#777777; width:180px;">Name</td><td style="padding:10px 0; border-bottom:1px solid #eeeeee; color:#111111;"><strong>${inquiry.customerName}</strong></td></tr>
+                  <tr><td style="padding:10px 0; border-bottom:1px solid #eeeeee; color:#777777;">Email</td><td style="padding:10px 0; border-bottom:1px solid #eeeeee;"><a href="mailto:${inquiry.email}" style="color:#D97706; text-decoration:none;">${inquiry.email}</a></td></tr>
+                  <tr><td style="padding:10px 0; border-bottom:1px solid #eeeeee; color:#777777;">Phone</td><td style="padding:10px 0; border-bottom:1px solid #eeeeee;"><a href="tel:${inquiry.phone}" style="color:#D97706; text-decoration:none;">${inquiry.phone}</a></td></tr>
+                  <tr><td style="padding:10px 0; border-bottom:1px solid #eeeeee; color:#777777;">Submitted At</td><td style="padding:10px 0; border-bottom:1px solid #eeeeee; color:#111111;">${submittedAt}</td></tr>
+                </table>
+                <div style="margin-top:20px; background:#fafafa; border:1px solid #eeeeee; border-radius:8px; padding:14px;">
+                  <p style="margin:0 0 8px 0; color:#777777; font-size:13px; text-transform:uppercase; letter-spacing:0.4px;">Message</p>
+                  <p style="margin:0; color:#222222; white-space:pre-wrap; line-height:1.6;">${inquiry.description}</p>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>
+  `;
+
+  await transporter.sendMail({
+    from: `"KatMitra Website" <${process.env.EMAIL_USER}>`,
     to: toEmail,
     subject,
     html: htmlTemplate,
