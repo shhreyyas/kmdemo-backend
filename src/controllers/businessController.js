@@ -7,6 +7,57 @@ const TRIAL_DAYS = 30;
 
 const ALLOWED_CATERING = new Set(["veg", "non_veg"]);
 
+/**
+ * POST /api/service-types
+ * Body: { names: ["Live Counter", "Outdoor Catering"] }
+ * Auth: required
+ * Creates service types that don't already exist and returns all of them.
+ */
+exports.createServiceTypes = async (req, res) => {
+  try {
+    const { names } = req.body;
+
+    if (!Array.isArray(names) || names.length === 0) {
+      return errorResponse(res, "names array is required", 422, "VALIDATION_ERROR");
+    }
+
+    const trimmed = names
+      .map((n) => (typeof n === "string" ? n.trim() : ""))
+      .filter((n) => n.length > 0);
+
+    if (trimmed.length === 0) {
+      return errorResponse(res, "At least one non-empty name is required", 422, "VALIDATION_ERROR");
+    }
+
+    const results = [];
+
+    for (const name of trimmed) {
+      let slug = name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+      if (!slug) slug = `custom-${Date.now()}`;
+
+      // Use upsert to avoid unique constraint race conditions
+      const row = await prisma.serviceType.upsert({
+        where: { slug },
+        update: {},              // already exists — do nothing
+        create: { name, slug, status: 1 },
+      });
+
+      results.push({
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        icon: row.icon,
+        status: row.status,
+      });
+    }
+
+    return successResponse(res, "Service types added successfully", results, 201);
+  } catch (error) {
+    console.error("createServiceTypes error:", error.message, error.stack);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
 exports.listServiceTypes = async (req, res) => {
   try {
     const rows = await prisma.serviceType.findMany({

@@ -44,6 +44,9 @@ app.use("/api", quotationRoutes);
 const contactRoutes = require("./routes/contactRoutes");
 app.use("/api", contactRoutes);
 
+const appVersionRoutes = require("./routes/appVersionRoutes");
+app.use("/api", appVersionRoutes);
+
 // Test Route
 app.get("/", (req, res) => {
   res.send("Catering API Running");
