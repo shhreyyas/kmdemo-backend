@@ -38,6 +38,9 @@ app.use("/api", categoryRoutes);
 const bookingRoutes = require("./routes/bookingRoutes");
 app.use("/api", bookingRoutes);
 
+const dishRoutes = require("./routes/dishRoutes");
+app.use("/api", dishRoutes);
+
 const quotationRoutes = require("./routes/quotationRoutes");
 app.use("/api", quotationRoutes);
 

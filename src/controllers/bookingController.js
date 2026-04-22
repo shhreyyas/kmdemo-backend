@@ -110,6 +110,8 @@ function serializeBooking(b, { includePayments = true } = {}) {
     customer_name: b.customerName,
     customer_phone: b.customerPhone,
     customer_email: b.customerEmail,
+    event_range_start: b.eventRangeStart?.toISOString?.() ?? b.eventRangeStart,
+    event_range_end: b.eventRangeEnd?.toISOString?.() ?? b.eventRangeEnd,
     event_at: b.eventAt?.toISOString?.() ?? b.eventAt,
     event_location: b.eventLocation,
     function_type: b.functionType,
@@ -182,6 +184,12 @@ async function createBooking(req, res) {
         customerName: body.customer_name ?? null,
         customerPhone: body.customer_phone ?? null,
         customerEmail: body.customer_email ?? null,
+        eventRangeStart: body.event_range_start
+          ? new Date(body.event_range_start)
+          : null,
+        eventRangeEnd: body.event_range_end
+          ? new Date(body.event_range_end)
+          : null,
         eventAt: body.event_at ? new Date(body.event_at) : null,
         eventLocation: body.event_location ?? null,
         functionType: body.function_type ?? null,
@@ -317,6 +325,14 @@ async function patchBooking(req, res) {
       customerName: body.customer_name !== undefined ? body.customer_name : existing.customerName,
       customerPhone: body.customer_phone !== undefined ? body.customer_phone : existing.customerPhone,
       customerEmail: body.customer_email !== undefined ? body.customer_email : existing.customerEmail,
+      eventRangeStart:
+        body.event_range_start !== undefined
+          ? (body.event_range_start ? new Date(body.event_range_start) : null)
+          : existing.eventRangeStart,
+      eventRangeEnd:
+        body.event_range_end !== undefined
+          ? (body.event_range_end ? new Date(body.event_range_end) : null)
+          : existing.eventRangeEnd,
       eventAt:
         body.event_at !== undefined ? (body.event_at ? new Date(body.event_at) : null) : existing.eventAt,
       eventLocation: body.event_location !== undefined ? body.event_location : existing.eventLocation,
@@ -439,6 +455,44 @@ async function getBooking(req, res) {
     return successResponse(res, "OK", serializeBooking(row));
   } catch (e) {
     console.error("getBooking:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
+ * DELETE /v1/bookings/:id
+ * Deletes a draft booking for current business.
+ */
+async function deleteBooking(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+
+    const existing = await prisma.booking.findFirst({
+      where: { id: bookingId, businessId },
+      select: { id: true, status: true },
+    });
+    if (!existing) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    if (existing.status !== "DRAFT") {
+      return errorResponse(
+        res,
+        "Only draft bookings can be deleted",
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.bookingMenuItem.deleteMany({ where: { bookingId } });
+      await tx.paymentTransaction.deleteMany({ where: { bookingId } });
+      await tx.booking.delete({ where: { id: bookingId } });
+    });
+
+    return successResponse(res, "Draft deleted", { id: bookingId });
+  } catch (e) {
+    console.error("deleteBooking:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
 }
@@ -585,13 +639,61 @@ async function recordPayment(req, res) {
   }
 }
 
+/**
+ * POST /v1/bookings/:id/pdf-jobs
+ * Placeholder async trigger endpoint for non-blocking PDF pipeline.
+ */
+async function triggerBookingPdfJobs(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+    const existing = await prisma.booking.findFirst({
+      where: { id: bookingId, businessId },
+      select: { id: true },
+    });
+    if (!existing) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    // Current implementation intentionally returns accepted trigger response.
+    return successResponse(res, "PDF jobs triggered", { ok: true });
+  } catch (e) {
+    console.error("triggerBookingPdfJobs:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
+ * POST /v1/bookings/:id/pdf-jobs/:jobId/retry
+ * Placeholder retry endpoint for PDF pipeline.
+ */
+async function retryBookingPdfJob(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+    const existing = await prisma.booking.findFirst({
+      where: { id: bookingId, businessId },
+      select: { id: true },
+    });
+    if (!existing) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    return successResponse(res, "PDF job retry queued", { ok: true });
+  } catch (e) {
+    console.error("retryBookingPdfJob:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 module.exports = {
   createBooking,
   patchBooking,
   listBookings,
   getBooking,
+  deleteBooking,
   confirmBooking,
   recordPayment,
+  triggerBookingPdfJobs,
+  retryBookingPdfJob,
   computePricingFromSnapshots,
   canEditMenuBeforeEvent,
 };

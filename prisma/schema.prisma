@@ -61,6 +61,7 @@ model Business {
   users        User[]
   serviceLinks BusinessServiceType[]
   menuItems    MenuItem[]
+  dishes       Dish[]
   bookings     Booking[]
   quotations   Quotation[]
   billingSubscriptions BillingSubscription[]
@@ -184,6 +185,7 @@ model MenuItem {
   childCopies MenuItem[] @relation("MenuItemLineage")
   bookingMenuItems    BookingMenuItem[]
   quotationMenuItems  QuotationMenuItem[]
+  dishMenuItems       DishMenuItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -257,6 +259,8 @@ model Booking {
   customerName  String?
   customerPhone String?
   customerEmail String?
+  eventRangeStart DateTime?
+  eventRangeEnd   DateTime?
 
   eventAt       DateTime?
   eventLocation String?
@@ -299,6 +303,37 @@ model BookingMenuItem {
 
   @@unique([bookingId, menuItemId])
   @@index([bookingId])
+}
+
+model Dish {
+  id            String   @id @default(uuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name          String
+  pricePerPlate Decimal  @default(0) @db.Decimal(12, 2)
+  isTemplate    Boolean  @default(true)
+  parentDishId  String?
+  parentDish    Dish?    @relation("DishLineage", fields: [parentDishId], references: [id])
+  childDishes   Dish[]   @relation("DishLineage")
+  menuItems     DishMenuItem[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([parentDishId])
+}
+
+model DishMenuItem {
+  id          String   @id @default(uuid())
+  dishId      String
+  menuItemId  String
+  quantity    Int      @default(1)
+  dish        Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
+  menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+
+  @@unique([dishId, menuItemId])
+  @@index([dishId])
 }
 
 model PaymentTransaction {
