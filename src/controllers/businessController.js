@@ -99,20 +99,11 @@ exports.registerBusiness = async (req, res) => {
       gst_number,
     } = req.body;
 
-    const yoe = Number(years_of_experience);
+    const yoe = years_of_experience !== undefined ? Number(years_of_experience) : 0;
     if (
-      !business_logo ||
       !business_name ||
-      !business_owner_name ||
       !business_address ||
-      years_of_experience === undefined ||
-      !Number.isFinite(yoe) ||
-      !Number.isInteger(yoe) ||
-      yoe < 0 ||
-      !Array.isArray(service_types) ||
-      service_types.length === 0 ||
-      !Array.isArray(catering_types) ||
-      catering_types.length === 0
+      !contact_number
     ) {
       return errorResponse(
         res,
@@ -158,15 +149,17 @@ exports.registerBusiness = async (req, res) => {
       );
     }
 
-    for (const ct of catering_types) {
-      if (!ALLOWED_CATERING.has(ct)) {
-        return errorResponse(
-          res,
-          "One or more required fields are missing or malformed",
-          200,
-          "VALIDATION_ERROR",
-          "catering_types must only include veg and non_veg.",
-        );
+    if (Array.isArray(catering_types)) {
+      for (const ct of catering_types) {
+        if (!ALLOWED_CATERING.has(ct)) {
+          return errorResponse(
+            res,
+            "One or more required fields are missing or malformed",
+            200,
+            "VALIDATION_ERROR",
+            "catering_types must only include veg and non_veg.",
+          );
+        }
       }
     }
 
@@ -179,19 +172,22 @@ exports.registerBusiness = async (req, res) => {
       );
     }
 
-    const uniqueSlugs = [...new Set(service_types)];
-    const existingSlugs = await prisma.serviceType.findMany({
-      where: { slug: { in: uniqueSlugs }, status: 1 },
-    });
+    let existingSlugs = [];
+    if (Array.isArray(service_types) && service_types.length > 0) {
+      const uniqueSlugs = [...new Set(service_types)];
+      existingSlugs = await prisma.serviceType.findMany({
+        where: { slug: { in: uniqueSlugs }, status: 1 },
+      });
 
-    if (existingSlugs.length !== uniqueSlugs.length) {
-      return errorResponse(
-        res,
-        "One or more required fields are missing or malformed",
-        200,
-        "VALIDATION_ERROR",
-        "Invalid service_types slug(s). Use values from GET /service-types.",
-      );
+      if (existingSlugs.length !== uniqueSlugs.length) {
+        return errorResponse(
+          res,
+          "One or more required fields are missing or malformed",
+          200,
+          "VALIDATION_ERROR",
+          "Invalid service_types slug(s). Use values from GET /service-types.",
+        );
+      }
     }
 
     const now = new Date();
@@ -201,15 +197,15 @@ exports.registerBusiness = async (req, res) => {
     const business = await prisma.$transaction(async (tx) => {
       const b = await tx.business.create({
         data: {
-          logoUrl: business_logo,
+          logoUrl: business_logo ?? null,
           name: business_name,
-          ownerName: business_owner_name,
+          ownerName: business_owner_name ?? "",
           sameAsOwnerNumber: Boolean(same_as_owner_number),
           contactNumber: resolvedContact,
           email: business_email ?? "",
           address: business_address,
-          cateringTypes: catering_types,
-          yearsExperience: yoe,
+          cateringTypes: Array.isArray(catering_types) ? catering_types : [],
+          yearsExperience: Number.isFinite(yoe) ? yoe : 0,
           registrationNumber: business_register_number ?? "",
           gstNumber: gst_number ?? "",
           subscriptionStatus: "trial",
@@ -403,6 +399,86 @@ exports.updateBusiness = async (req, res) => {
     );
   } catch (error) {
     console.error("updateBusiness error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * DELETE /api/business
+ * Auth + business context required.
+ * Fully removes the business and all related data (cascade).
+ * Unlinks all users from the business first.
+ */
+exports.deleteBusiness = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const businessId = req.businessId;
+
+    if (!businessId) {
+      return errorResponse(
+        res,
+        "No business context. Register a business first.",
+        400,
+        "NO_BUSINESS",
+      );
+    }
+
+    const business = await prisma.business.findUnique({
+      where: { id: businessId },
+    });
+
+    if (!business) {
+      return errorResponse(res, "Business not found", 404, "NOT_FOUND");
+    }
+
+    if (business.createdByUserId !== userId) {
+      return errorResponse(
+        res,
+        "Only the business owner can delete this business",
+        403,
+        "FORBIDDEN",
+      );
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Unlink all users from this business
+      await tx.user.updateMany({
+        where: { businessId },
+        data: { businessId: null },
+      });
+
+      // Delete booking menu items and quotation menu items first
+      // (they have onDelete: Restrict on menuItemId, blocking cascade)
+      const menuItemIds = (
+        await tx.menuItem.findMany({
+          where: { businessId },
+          select: { id: true },
+        })
+      ).map((m) => m.id);
+
+      if (menuItemIds.length > 0) {
+        await tx.bookingMenuItem.deleteMany({
+          where: { menuItemId: { in: menuItemIds } },
+        });
+        await tx.quotationMenuItem.deleteMany({
+          where: { menuItemId: { in: menuItemIds } },
+        });
+      }
+
+      // Delete the business (cascades to service links, menu items, bookings, quotations, billing)
+      await tx.business.delete({
+        where: { id: businessId },
+      });
+    });
+
+    return successResponse(
+      res,
+      "Business deleted successfully",
+      null,
+      200,
+    );
+  } catch (error) {
+    console.error("deleteBusiness error:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };

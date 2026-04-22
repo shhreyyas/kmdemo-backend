@@ -812,6 +812,23 @@ exports.deleteUser = async (req, res) => {
       });
 
       if (remainingUsers === 0) {
+        // Delete booking/quotation menu items first (onDelete: Restrict on menuItemId)
+        const menuItemIds = (
+          await prisma.menuItem.findMany({
+            where: { businessId },
+            select: { id: true },
+          })
+        ).map((m) => m.id);
+
+        if (menuItemIds.length > 0) {
+          await prisma.bookingMenuItem.deleteMany({
+            where: { menuItemId: { in: menuItemIds } },
+          });
+          await prisma.quotationMenuItem.deleteMany({
+            where: { menuItemId: { in: menuItemIds } },
+          });
+        }
+
         await prisma.business.delete({ where: { id: businessId } });
       }
     }

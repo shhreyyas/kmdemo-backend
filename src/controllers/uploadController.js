@@ -1,6 +1,5 @@
-const fs = require("fs").promises;
-const path = require("path");
 const crypto = require("crypto");
+const supabase = require("../config/supabase");
 const { successResponse, errorResponse } = require("../utils/response");
 
 const MAX_BYTES = 5 * 1024 * 1024; // 5MB
@@ -18,9 +17,9 @@ function stripDataUrlBase64(raw) {
 }
 
 /**
- * @param {string} subdir - folder under `uploads/` (e.g. `menu`, `profile`)
+ * @param {string} bucket - Supabase Storage bucket name
  */
-function createBase64ImageHandler(subdir, logLabel) {
+function createBase64ImageHandler(bucket, logLabel) {
   return async (req, res) => {
     try {
       const { base64, mime: mimeRaw } = req.body;
@@ -65,17 +64,29 @@ function createBase64ImageHandler(subdir, logLabel) {
       }
 
       const fileName = `${crypto.randomUUID()}.${ext}`;
-      const uploadDir = path.join(__dirname, "..", "..", "uploads", subdir);
-      await fs.mkdir(uploadDir, { recursive: true });
-      const filePath = path.join(uploadDir, fileName);
-      await fs.writeFile(filePath, buffer);
 
-      const publicBase =
-        process.env.PUBLIC_APP_URL?.replace(/\/$/, "") ||
-        `${req.protocol}://${req.get("host")}`;
-      const url = `${publicBase}/uploads/${subdir}/${fileName}`;
+      const { error } = await supabase.storage
+        .from(bucket)
+        .upload(fileName, buffer, {
+          contentType: mime,
+          upsert: false,
+        });
 
-      return successResponse(res, "Image uploaded successfully", { url }, 200);
+      if (error) {
+        console.error(`${logLabel} supabase upload error:`, error.message);
+        return errorResponse(res, "Failed to upload image", 500, "UPLOAD_ERROR");
+      }
+
+      const { data: publicUrlData } = supabase.storage
+        .from(bucket)
+        .getPublicUrl(fileName);
+
+      return successResponse(
+        res,
+        "Image uploaded successfully",
+        { url: publicUrlData.publicUrl },
+        200,
+      );
     } catch (error) {
       console.error(`${logLabel} error:`, error.message);
       return errorResponse(res, "Server error", 500, "ERROR");
@@ -86,13 +97,20 @@ function createBase64ImageHandler(subdir, logLabel) {
 /**
  * POST /api/v1/upload-menu-image
  * Body: { base64: string, mime?: string }
- * Auth + business context required (same as menu routes).
+ * Auth + business context required.
  */
-exports.uploadMenuImage = createBase64ImageHandler("menu", "uploadMenuImage");
+exports.uploadMenuImage = createBase64ImageHandler("menu_item_image", "uploadMenuImage");
 
 /**
  * POST /api/v1/upload-profile-image
  * Body: { base64: string, mime?: string }
- * Auth only — user profile photos do not require a business.
+ * Auth only — user profile photos.
  */
-exports.uploadProfileImage = createBase64ImageHandler("profile", "uploadProfileImage");
+exports.uploadProfileImage = createBase64ImageHandler("profile_pictures", "uploadProfileImage");
+
+/**
+ * POST /api/v1/upload-business-image
+ * Body: { base64: string, mime?: string }
+ * Auth only — business profile pictures / logos.
+ */
+exports.uploadBusinessImage = createBase64ImageHandler("business_profile_pictures", "uploadBusinessImage");
