@@ -168,6 +168,7 @@ model MenuItem {
   id              String   @id @default(uuid())
   name            String
   description     String?  @db.Text
+  howToMake       String?  @db.Text
   pricePerPerson  Decimal  @db.Decimal(12, 2)
   category        String
   foodType        String
@@ -241,6 +242,12 @@ enum PaymentMethod {
   BANK_TRANSFER
 }
 
+enum EventStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+}
+
 enum QuotationStatus {
   DRAFT
   SENT
@@ -280,6 +287,7 @@ model Booking {
 
   menuItems BookingMenuItem[]
   payments  PaymentTransaction[]
+  events    BookingEvent[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -287,6 +295,29 @@ model Booking {
   @@unique([businessId, bookingCode])
   @@index([businessId, status])
   @@index([businessId, eventAt])
+}
+
+model BookingEvent {
+  id           String      @id @default(uuid())
+  bookingId    String
+  eventAt      DateTime?
+  eventLocation String?
+  functionType String?
+  guestCount   Int?
+  notes        String?     @db.Text
+  status       EventStatus @default(PENDING)
+  dishId       String?
+  parentDishId String?
+  isTemplate   Boolean?
+  eventTotal   Decimal?    @db.Decimal(12, 2)
+  eventSnapshot Json?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([bookingId, eventAt])
 }
 
 model BookingMenuItem {

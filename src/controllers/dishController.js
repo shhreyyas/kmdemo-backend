@@ -7,7 +7,69 @@ function num(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function serializeDish(dish) {
+function parseIngredients(ingredients) {
+  if (Array.isArray(ingredients)) return ingredients;
+  if (typeof ingredients === "string") {
+    try {
+      const parsed = JSON.parse(ingredients);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function buildDishHowToMake(menuItems) {
+  return (menuItems || [])
+    .map((row) => {
+      const howToMake = String(row.menuItem?.howToMake ?? "").trim();
+      if (!howToMake) return null;
+      return {
+        menu_item_id: row.menuItem.id,
+        menu_item_name: row.menuItem.name,
+        instructions: howToMake,
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildTotalRequiredIngredients(menuItems) {
+  const buckets = new Map();
+  for (const row of menuItems || []) {
+    const multiplier = Math.max(1, parseInt(String(row.quantity ?? 1), 10) || 1);
+    const ingredients = parseIngredients(row.menuItem?.ingredients);
+    for (const ing of ingredients) {
+      const ingredientName = String(ing?.name ?? "").trim();
+      if (!ingredientName) continue;
+      const unit = String(ing?.unit ?? "").trim();
+      const qty = num(ing?.qty);
+      if (qty <= 0) continue;
+      const totalQty = qty * multiplier;
+      const key = `${ingredientName.toLowerCase()}::${unit.toLowerCase()}`;
+      const existing = buckets.get(key);
+      if (!existing) {
+        buckets.set(key, {
+          ingredient_name: ingredientName,
+          unit,
+          total_quantity: totalQty,
+        });
+      } else {
+        existing.total_quantity = num(existing.total_quantity) + totalQty;
+      }
+    }
+  }
+  return Array.from(buckets.values()).sort((a, b) =>
+    String(a.ingredient_name).localeCompare(String(b.ingredient_name)),
+  );
+}
+
+function serializeDish(dish, options = {}) {
+  const includeComputed = options.includeComputed === true;
+  const howToMake = includeComputed ? buildDishHowToMake(dish.menuItems || []) : undefined;
+  const totalRequiredIngredients = includeComputed
+    ? buildTotalRequiredIngredients(dish.menuItems || [])
+    : undefined;
   return {
     id: dish.id,
     business_id: dish.businessId,
@@ -26,9 +88,16 @@ function serializeDish(dish) {
             price_per_person: num(row.menuItem.pricePerPerson),
             category: row.menuItem.category,
             image_url: row.menuItem.imageUrl ?? null,
+            how_to_make: row.menuItem.howToMake ?? null,
           }
         : undefined,
     })),
+    ...(includeComputed
+      ? {
+          how_to_make: howToMake,
+          total_required_ingredients: totalRequiredIngredients,
+        }
+      : {}),
     created_at: dish.createdAt?.toISOString?.() ?? dish.createdAt,
     updated_at: dish.updatedAt?.toISOString?.() ?? dish.updatedAt,
   };
@@ -37,17 +106,50 @@ function serializeDish(dish) {
 async function listDishes(req, res) {
   try {
     const businessId = req.businessId;
-    const rows = await prisma.dish.findMany({
-      where: { businessId, isTemplate: true },
-      orderBy: { updatedAt: "desc" },
-      include: {
-        menuItems: {
-          include: { menuItem: true },
-          orderBy: { createdAt: "asc" },
+    const q = String(req.query?.q ?? "").trim();
+    const page = Math.max(1, parseInt(String(req.query?.page ?? "1"), 10) || 1);
+    const perPage = Math.min(
+      50,
+      Math.max(1, parseInt(String(req.query?.per_page ?? "10"), 10) || 10),
+    );
+    const where = {
+      businessId,
+      isTemplate: true,
+      ...(q
+        ? {
+            name: {
+              contains: q,
+              mode: "insensitive",
+            },
+          }
+        : {}),
+    };
+    const skip = (page - 1) * perPage;
+    const [rows, total] = await Promise.all([
+      prisma.dish.findMany({
+        where,
+        orderBy: { updatedAt: "desc" },
+        skip,
+        take: perPage,
+        include: {
+          menuItems: {
+            include: { menuItem: true },
+            orderBy: { createdAt: "asc" },
+          },
         },
+      }),
+      prisma.dish.count({ where }),
+    ]);
+    const lastPage = Math.max(1, Math.ceil(total / perPage));
+    return successResponse(res, "OK", {
+      items: rows.map(serializeDish),
+      pagination: {
+        total,
+        page,
+        per_page: perPage,
+        last_page: lastPage,
       },
     });
-    return successResponse(res, "OK", rows.map(serializeDish));
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
@@ -67,7 +169,7 @@ async function getDish(req, res) {
       },
     });
     if (!row) return errorResponse(res, "Dish not found", 404, "NOT_FOUND");
-    return successResponse(res, "OK", serializeDish(row));
+    return successResponse(res, "OK", serializeDish(row, { includeComputed: true }));
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }

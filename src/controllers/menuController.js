@@ -108,6 +108,17 @@ function normalizeIngredients(raw) {
   return raw;
 }
 
+function hasValidIngredients(raw) {
+  const arr = normalizeIngredients(raw);
+  if (!arr.length) return false;
+  return arr.every((r) => {
+    const name = String(r?.name ?? "").trim();
+    const unit = String(r?.unit ?? "").trim();
+    const qty = Number(String(r?.qty ?? "").trim());
+    return !!name && !!unit && Number.isFinite(qty) && qty > 0;
+  });
+}
+
 /**
  * Row IDs where at least one ingredient object has a matching `name` (case-insensitive substring).
  */
@@ -172,6 +183,7 @@ function formatMenuItem(
     _id: row.id,
     name: row.name,
     description: row.description ?? null,
+    how_to_make: row.howToMake ?? null,
     price_per_person: price,
     category,
     food_type: row.foodType,
@@ -199,7 +211,16 @@ exports.createMenuItem = async (req, res) => {
     const userId = req.user.userId;
     const businessId = req.businessId;
 
-    const { name, price_per_person, category, food_type, ingredients, image_url, description } =
+    const {
+      name,
+      price_per_person,
+      category,
+      food_type,
+      ingredients,
+      image_url,
+      description,
+      how_to_make,
+    } =
       req.body;
 
     if (
@@ -255,6 +276,15 @@ exports.createMenuItem = async (req, res) => {
     }
 
     const ing = normalizeIngredients(ingredients);
+    if (!hasValidIngredients(ing)) {
+      return errorResponse(
+        res,
+        "Missing or invalid request fields",
+        422,
+        "VALIDATION_ERROR",
+        "ingredients are required and each row must have name, qty (>0), and unit.",
+      );
+    }
 
     let resolvedImageUrl = null;
     if (image_url !== undefined && image_url !== null) {
@@ -295,10 +325,35 @@ exports.createMenuItem = async (req, res) => {
       resolvedDescription = trimmed === "" ? null : trimmed;
     }
 
+    let resolvedHowToMake = null;
+    if (how_to_make !== undefined && how_to_make !== null) {
+      if (typeof how_to_make !== "string") {
+        return errorResponse(
+          res,
+          "Missing or invalid request fields",
+          422,
+          "VALIDATION_ERROR",
+          "how_to_make must be a string or omitted.",
+        );
+      }
+      const trimmed = how_to_make.trim();
+      if (trimmed.length > 10000) {
+        return errorResponse(
+          res,
+          "Missing or invalid request fields",
+          422,
+          "VALIDATION_ERROR",
+          "how_to_make must be 10000 characters or fewer.",
+        );
+      }
+      resolvedHowToMake = trimmed === "" ? null : trimmed;
+    }
+
     const created = await prisma.menuItem.create({
       data: {
         name: name.trim(),
         description: resolvedDescription,
+        howToMake: resolvedHowToMake,
         pricePerPerson: new Prisma.Decimal(String(price)),
         category: normalizeCategoryForStorage(category.trim()),
         foodType: food_type,
@@ -584,7 +639,16 @@ exports.updateMenuItem = async (req, res) => {
       );
     }
 
-    const { name, price_per_person, category, food_type, ingredients, image_url, description } =
+    const {
+      name,
+      price_per_person,
+      category,
+      food_type,
+      ingredients,
+      image_url,
+      description,
+      how_to_make,
+    } =
       req.body;
     const updates = {};
 
@@ -647,6 +711,15 @@ exports.updateMenuItem = async (req, res) => {
           "ingredients must be an array.",
         );
       }
+      if (!hasValidIngredients(ingredients)) {
+        return errorResponse(
+          res,
+          "Missing or invalid request fields",
+          422,
+          "VALIDATION_ERROR",
+          "ingredients are required and each row must have name, qty (>0), and unit.",
+        );
+      }
       updates.ingredients = ingredients;
     }
     if (image_url !== undefined) {
@@ -692,6 +765,32 @@ exports.updateMenuItem = async (req, res) => {
         updates.description = trimmed === "" ? null : trimmed;
       }
     }
+    if (how_to_make !== undefined) {
+      if (how_to_make !== null && typeof how_to_make !== "string") {
+        return errorResponse(
+          res,
+          "Missing or invalid request fields",
+          422,
+          "VALIDATION_ERROR",
+          "how_to_make must be a string, null, or omitted.",
+        );
+      }
+      if (how_to_make === null) {
+        updates.howToMake = null;
+      } else {
+        const trimmed = how_to_make.trim();
+        if (trimmed.length > 10000) {
+          return errorResponse(
+            res,
+            "Missing or invalid request fields",
+            422,
+            "VALIDATION_ERROR",
+            "how_to_make must be 10000 characters or fewer.",
+          );
+        }
+        updates.howToMake = trimmed === "" ? null : trimmed;
+      }
+    }
 
     if (Object.keys(updates).length === 0) {
       return errorResponse(
@@ -709,6 +808,8 @@ exports.updateMenuItem = async (req, res) => {
           name: updates.name ?? menu.name,
           description:
             updates.description !== undefined ? updates.description : menu.description ?? null,
+          howToMake:
+            updates.howToMake !== undefined ? updates.howToMake : menu.howToMake ?? null,
           pricePerPerson:
             updates.pricePerPerson ??
             menu.pricePerPerson,

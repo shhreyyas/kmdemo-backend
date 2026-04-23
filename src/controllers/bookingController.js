@@ -68,6 +68,26 @@ function canEditMenuBeforeEvent(eventAt) {
   return today.getTime() < cutoff.getTime();
 }
 
+function serializeBookingEvent(ev) {
+  return {
+    id: ev.id,
+    booking_id: ev.bookingId,
+    event_at: ev.eventAt?.toISOString?.() ?? ev.eventAt ?? null,
+    event_location: ev.eventLocation ?? null,
+    function_type: ev.functionType ?? null,
+    guest_count: ev.guestCount ?? null,
+    notes: ev.notes ?? null,
+    status: ev.status ?? "PENDING",
+    dish_id: ev.dishId ?? null,
+    parent_dish_id: ev.parentDishId ?? null,
+    is_template: ev.isTemplate ?? null,
+    event_total: ev.eventTotal != null ? num(ev.eventTotal) : null,
+    event_snapshot: ev.eventSnapshot ?? null,
+    created_at: ev.createdAt?.toISOString?.() ?? ev.createdAt,
+    updated_at: ev.updatedAt?.toISOString?.() ?? ev.updatedAt,
+  };
+}
+
 async function generateUniqueBookingCode(tx, businessId) {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const n = Math.floor(Math.random() * 1000);
@@ -127,6 +147,7 @@ function serializeBooking(b, { includePayments = true } = {}) {
     amount_paid: num(b.amountPaid),
     payment_status: b.paymentStatus,
     menu_items: menuItems,
+    events: (b.events || []).map(serializeBookingEvent),
     ...(payments !== undefined ? { payments } : {}),
     can_edit_menu: canEditMenuBeforeEvent(b.eventAt),
     created_at: b.createdAt?.toISOString?.() ?? b.createdAt,
@@ -139,6 +160,7 @@ async function loadBookingForBusiness(bookingId, businessId, extras = {}) {
     where: { id: bookingId, businessId },
     include: {
       menuItems: true,
+      events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
       ...(extras.includePayments
         ? { payments: { orderBy: { createdAt: "desc" } } }
         : {}),
@@ -205,6 +227,26 @@ async function createBooking(req, res) {
       },
     });
 
+    if (Array.isArray(body.events) && body.events.length > 0) {
+      await prisma.bookingEvent.createMany({
+        data: body.events.map((ev) => ({
+          bookingId: booking.id,
+          eventAt: ev.event_at ? new Date(ev.event_at) : null,
+          eventLocation: ev.event_location ?? null,
+          functionType: ev.function_type ?? null,
+          guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
+          notes: ev.notes ?? null,
+          status: ev.status ?? "PENDING",
+          dishId: ev.dish_id ?? null,
+          parentDishId: ev.parent_dish_id ?? null,
+          isTemplate: ev.is_template ?? null,
+          eventSnapshot: ev.event_snapshot ?? null,
+          eventTotal:
+            ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null,
+        })),
+      });
+    }
+
     const withMenu = await loadBookingForBusiness(booking.id, businessId, {
       includePayments: true,
     });
@@ -235,9 +277,45 @@ async function patchBooking(req, res) {
       return errorResponse(res, "Cancelled booking cannot be updated", 422, "VALIDATION_ERROR");
     }
 
+    // Optimistic concurrency guard (plan: updated_at conflict check).
+    if (body.updated_at) {
+      const clientUpdatedAt = new Date(body.updated_at).toISOString();
+      const serverUpdatedAt = new Date(existing.updatedAt).toISOString();
+      if (clientUpdatedAt !== serverUpdatedAt) {
+        return errorResponse(
+          res,
+          "This booking changed on another device. Please refresh before saving.",
+          409,
+          "WRITE_CONFLICT",
+        );
+      }
+    }
+
     const isDraft = existing.status === "DRAFT";
     const menuItemIds = Array.isArray(body.menu_item_ids) ? body.menu_item_ids : null;
     const menuLines = Array.isArray(body.menu_items) ? body.menu_items : null;
+
+    // Post-confirm lock granularity:
+    // confirmed bookings allow only payment/status flows via dedicated endpoints;
+    // block menu/event editing from patch route.
+    if (!isDraft) {
+      const touchesMenu = menuItemIds != null || menuLines != null;
+      const touchesEvents = Array.isArray(body.events);
+      const touchesEventFields =
+        body.event_at !== undefined ||
+        body.event_location !== undefined ||
+        body.function_type !== undefined ||
+        body.guest_count !== undefined ||
+        body.notes !== undefined;
+      if (touchesMenu || touchesEvents || touchesEventFields) {
+        return errorResponse(
+          res,
+          "Confirmed booking is locked for event/menu updates.",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+    }
 
     if (menuItemIds != null || menuLines != null) {
       if (!isDraft && !canEditMenuBeforeEvent(existing.eventAt)) {
@@ -302,6 +380,59 @@ async function patchBooking(req, res) {
       }
     }
 
+    if (Array.isArray(body.events)) {
+      await prisma.$transaction(async (tx) => {
+        const existingEvents = await tx.bookingEvent.findMany({
+          where: { bookingId },
+          select: { id: true },
+        });
+        const existingIds = new Set(existingEvents.map((ev) => ev.id));
+        const keepIds = [];
+
+        for (const rawEvent of body.events) {
+          const ev = rawEvent || {};
+          const payload = {
+            eventAt: ev.event_at ? new Date(ev.event_at) : null,
+            eventLocation: ev.event_location ?? null,
+            functionType: ev.function_type ?? null,
+            guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
+            notes: ev.notes ?? null,
+            status: ev.status ?? "PENDING",
+            dishId: ev.dish_id ?? null,
+            parentDishId: ev.parent_dish_id ?? null,
+            isTemplate: ev.is_template ?? null,
+            eventSnapshot: ev.event_snapshot ?? null,
+            eventTotal:
+              ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null,
+          };
+
+          if (ev.id && existingIds.has(ev.id)) {
+            await tx.bookingEvent.update({
+              where: { id: ev.id },
+              data: payload,
+            });
+            keepIds.push(ev.id);
+          } else {
+            const created = await tx.bookingEvent.create({
+              data: {
+                bookingId,
+                ...payload,
+              },
+              select: { id: true },
+            });
+            keepIds.push(created.id);
+          }
+        }
+
+        await tx.bookingEvent.deleteMany({
+          where: {
+            bookingId,
+            ...(keepIds.length ? { id: { notIn: keepIds } } : {}),
+          },
+        });
+      });
+    }
+
     const guests =
       body.guest_count != null ? parseInt(body.guest_count, 10) : existing.guestCount ?? 0;
     const discount = body.discount_amount != null ? num(body.discount_amount) : num(existing.discountAmount);
@@ -362,7 +493,11 @@ async function patchBooking(req, res) {
         ...baseData,
         ...draftOnly,
       },
-      include: { menuItems: true, payments: { orderBy: { createdAt: "desc" } } },
+      include: {
+        menuItems: true,
+        events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+        payments: { orderBy: { createdAt: "desc" } },
+      },
     });
 
     return successResponse(res, "Booking updated", serializeBooking(updated));
@@ -418,6 +553,7 @@ async function listBookings(req, res) {
         skip,
         include: {
           menuItems: true,
+          events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
           payments: { orderBy: { createdAt: "desc" }, take: 5 },
         },
       }),
@@ -446,6 +582,7 @@ async function getBooking(req, res) {
       where: { id: bookingId, businessId },
       include: {
         menuItems: true,
+        events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
         payments: { orderBy: { createdAt: "desc" } },
       },
     });
@@ -507,7 +644,10 @@ async function confirmBooking(req, res) {
 
     const existing = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
-      include: { menuItems: true },
+      include: {
+        menuItems: true,
+        events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+      },
     });
     if (!existing) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
@@ -543,7 +683,11 @@ async function confirmBooking(req, res) {
           totalDue: new Prisma.Decimal(String(pricing.totalDue)),
           paymentStatus: paymentStatusFromAmounts(existing.amountPaid, pricing.totalDue),
         },
-        include: { menuItems: true, payments: { orderBy: { createdAt: "desc" } } },
+        include: {
+          menuItems: true,
+          events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+          payments: { orderBy: { createdAt: "desc" } },
+        },
       });
       return updated;
     });
@@ -627,6 +771,7 @@ async function recordPayment(req, res) {
         },
         include: {
           menuItems: true,
+          events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
           payments: { orderBy: { createdAt: "desc" } },
         },
       });
