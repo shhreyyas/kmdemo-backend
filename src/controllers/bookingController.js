@@ -68,6 +68,13 @@ function canEditMenuBeforeEvent(eventAt) {
   return today.getTime() < cutoff.getTime();
 }
 
+function deriveEventSubtotal(ev) {
+  if (ev?.eventTotal != null) return num(ev.eventTotal);
+  const guests = Math.max(0, Number(ev?.guestCount ?? 0) || 0);
+  const snapshotPrice = Number(ev?.eventSnapshot?.price_per_plate ?? 0) || 0;
+  return guests * snapshotPrice;
+}
+
 function serializeBookingEvent(ev) {
   return {
     id: ev.id,
@@ -82,6 +89,7 @@ function serializeBookingEvent(ev) {
     parent_dish_id: ev.parentDishId ?? null,
     is_template: ev.isTemplate ?? null,
     event_total: ev.eventTotal != null ? num(ev.eventTotal) : null,
+    event_subtotal: deriveEventSubtotal(ev),
     event_snapshot: ev.eventSnapshot ?? null,
     created_at: ev.createdAt?.toISOString?.() ?? ev.createdAt,
     updated_at: ev.updatedAt?.toISOString?.() ?? ev.updatedAt,
@@ -121,6 +129,10 @@ function serializeBooking(b, { includePayments = true } = {}) {
         }))
       : undefined;
 
+  const serializedEvents = (b.events || []).map(serializeBookingEvent);
+  const hasEvents = serializedEvents.length > 0;
+  const firstEvent = hasEvents ? serializedEvents[0] : null;
+
   return {
     id: b.id,
     business_id: b.businessId,
@@ -132,11 +144,16 @@ function serializeBooking(b, { includePayments = true } = {}) {
     customer_email: b.customerEmail,
     event_range_start: b.eventRangeStart?.toISOString?.() ?? b.eventRangeStart,
     event_range_end: b.eventRangeEnd?.toISOString?.() ?? b.eventRangeEnd,
-    event_at: b.eventAt?.toISOString?.() ?? b.eventAt,
-    event_location: b.eventLocation,
-    function_type: b.functionType,
-    guest_count: b.guestCount,
-    notes: b.notes,
+    // Keep event details inside `events` once event rows exist.
+    ...(hasEvents
+      ? {}
+      : {
+          event_at: b.eventAt?.toISOString?.() ?? b.eventAt,
+          event_location: b.eventLocation,
+          function_type: b.functionType,
+          guest_count: b.guestCount,
+          notes: b.notes,
+        }),
     discount_amount: num(b.discountAmount),
     service_charge_pct: num(b.serviceChargePct),
     tax_pct: num(b.taxPct),
@@ -147,9 +164,9 @@ function serializeBooking(b, { includePayments = true } = {}) {
     amount_paid: num(b.amountPaid),
     payment_status: b.paymentStatus,
     menu_items: menuItems,
-    events: (b.events || []).map(serializeBookingEvent),
+    events: serializedEvents,
     ...(payments !== undefined ? { payments } : {}),
-    can_edit_menu: canEditMenuBeforeEvent(b.eventAt),
+    can_edit_menu: canEditMenuBeforeEvent(firstEvent?.event_at ?? b.eventAt),
     created_at: b.createdAt?.toISOString?.() ?? b.createdAt,
     updated_at: b.updatedAt?.toISOString?.() ?? b.updatedAt,
   };
@@ -169,7 +186,7 @@ async function loadBookingForBusiness(bookingId, businessId, extras = {}) {
 }
 
 /**
- * POST /v1/bookings — create draft
+ * POST /v1/createBooking — create draft
  */
 async function createBooking(req, res) {
   try {
@@ -188,11 +205,13 @@ async function createBooking(req, res) {
       return errorResponse(res, "Business not found", 404, "NOT_FOUND");
     }
 
+    const firstEvent =
+      Array.isArray(body.events) && body.events.length > 0 ? body.events[0] : null;
     const sc = num(body.service_charge_pct ?? business.defaultServiceChargePct);
     const txp = num(body.tax_pct ?? business.defaultTaxPct);
     const pricing = computePricingFromSnapshots(
       [],
-      body.guest_count ?? 0,
+      body.guest_count ?? firstEvent?.guest_count ?? 0,
       body.discount_amount ?? 0,
       sc,
       txp,
@@ -212,11 +231,17 @@ async function createBooking(req, res) {
         eventRangeEnd: body.event_range_end
           ? new Date(body.event_range_end)
           : null,
-        eventAt: body.event_at ? new Date(body.event_at) : null,
-        eventLocation: body.event_location ?? null,
-        functionType: body.function_type ?? null,
-        guestCount: body.guest_count != null ? parseInt(body.guest_count, 10) : null,
-        notes: body.notes ?? null,
+        eventAt:
+          (firstEvent?.event_at ?? body.event_at)
+            ? new Date(firstEvent?.event_at ?? body.event_at)
+            : null,
+        eventLocation: firstEvent?.event_location ?? body.event_location ?? null,
+        functionType: firstEvent?.function_type ?? body.function_type ?? null,
+        guestCount:
+          firstEvent?.guest_count != null
+            ? parseInt(firstEvent.guest_count, 10)
+            : (body.guest_count != null ? parseInt(body.guest_count, 10) : null),
+        notes: firstEvent?.notes ?? body.notes ?? null,
         discountAmount: new Prisma.Decimal(String(body.discount_amount ?? 0)),
         serviceChargePct: new Prisma.Decimal(String(sc)),
         taxPct: new Prisma.Decimal(String(txp)),
@@ -294,6 +319,13 @@ async function patchBooking(req, res) {
     const isDraft = existing.status === "DRAFT";
     const menuItemIds = Array.isArray(body.menu_item_ids) ? body.menu_item_ids : null;
     const menuLines = Array.isArray(body.menu_items) ? body.menu_items : null;
+    const firstEvent =
+      Array.isArray(body.events) && body.events.length > 0 ? body.events[0] : null;
+    const nextEventAt = firstEvent?.event_at ?? body.event_at;
+    const nextEventLocation = firstEvent?.event_location ?? body.event_location;
+    const nextFunctionType = firstEvent?.function_type ?? body.function_type;
+    const nextGuestCount = firstEvent?.guest_count ?? body.guest_count;
+    const nextNotes = firstEvent?.notes ?? body.notes;
 
     // Post-confirm lock granularity:
     // confirmed bookings allow only payment/status flows via dedicated endpoints;
@@ -384,29 +416,71 @@ async function patchBooking(req, res) {
       await prisma.$transaction(async (tx) => {
         const existingEvents = await tx.bookingEvent.findMany({
           where: { bookingId },
-          select: { id: true },
+          select: {
+            id: true,
+            eventAt: true,
+            eventLocation: true,
+            functionType: true,
+            guestCount: true,
+            notes: true,
+            status: true,
+            dishId: true,
+            parentDishId: true,
+            isTemplate: true,
+            eventSnapshot: true,
+            eventTotal: true,
+          },
         });
-        const existingIds = new Set(existingEvents.map((ev) => ev.id));
+        const existingById = new Map(existingEvents.map((ev) => [ev.id, ev]));
         const keepIds = [];
 
         for (const rawEvent of body.events) {
           const ev = rawEvent || {};
-          const payload = {
-            eventAt: ev.event_at ? new Date(ev.event_at) : null,
-            eventLocation: ev.event_location ?? null,
-            functionType: ev.function_type ?? null,
-            guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
-            notes: ev.notes ?? null,
-            status: ev.status ?? "PENDING",
-            dishId: ev.dish_id ?? null,
-            parentDishId: ev.parent_dish_id ?? null,
-            isTemplate: ev.is_template ?? null,
-            eventSnapshot: ev.event_snapshot ?? null,
-            eventTotal:
-              ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null,
-          };
+          const current = ev.id ? existingById.get(ev.id) : null;
+          const payload = current
+            ? {
+                eventAt:
+                  ev.event_at !== undefined
+                    ? (ev.event_at ? new Date(ev.event_at) : null)
+                    : current.eventAt,
+                eventLocation:
+                  ev.event_location !== undefined ? ev.event_location : current.eventLocation,
+                functionType:
+                  ev.function_type !== undefined ? ev.function_type : current.functionType,
+                guestCount:
+                  ev.guest_count !== undefined
+                    ? (ev.guest_count != null ? parseInt(ev.guest_count, 10) : null)
+                    : current.guestCount,
+                notes: ev.notes !== undefined ? ev.notes : current.notes,
+                status: ev.status !== undefined ? ev.status : current.status,
+                dishId: ev.dish_id !== undefined ? ev.dish_id : current.dishId,
+                parentDishId:
+                  ev.parent_dish_id !== undefined ? ev.parent_dish_id : current.parentDishId,
+                isTemplate:
+                  ev.is_template !== undefined ? ev.is_template : current.isTemplate,
+                eventSnapshot:
+                  ev.event_snapshot !== undefined ? ev.event_snapshot : current.eventSnapshot,
+                eventTotal:
+                  ev.event_total !== undefined
+                    ? (ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null)
+                    : current.eventTotal,
+              }
+            : {
+                eventAt: ev.event_at ? new Date(ev.event_at) : null,
+                eventLocation: ev.event_location ?? null,
+                functionType: ev.function_type ?? null,
+                guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
+                notes: ev.notes ?? null,
+                status: ev.status ?? "PENDING",
+                dishId: ev.dish_id ?? null,
+                parentDishId: ev.parent_dish_id ?? null,
+                isTemplate: ev.is_template ?? null,
+                eventSnapshot: ev.event_snapshot ?? null,
+                eventTotal:
+                  ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null,
+              };
 
-          if (ev.id && existingIds.has(ev.id)) {
+          if (current) {
             await tx.bookingEvent.update({
               where: { id: ev.id },
               data: payload,
@@ -465,11 +539,11 @@ async function patchBooking(req, res) {
           ? (body.event_range_end ? new Date(body.event_range_end) : null)
           : existing.eventRangeEnd,
       eventAt:
-        body.event_at !== undefined ? (body.event_at ? new Date(body.event_at) : null) : existing.eventAt,
-      eventLocation: body.event_location !== undefined ? body.event_location : existing.eventLocation,
-      functionType: body.function_type !== undefined ? body.function_type : existing.functionType,
-      guestCount: body.guest_count != null ? parseInt(body.guest_count, 10) : existing.guestCount,
-      notes: body.notes !== undefined ? body.notes : existing.notes,
+        nextEventAt !== undefined ? (nextEventAt ? new Date(nextEventAt) : null) : existing.eventAt,
+      eventLocation: nextEventLocation !== undefined ? nextEventLocation : existing.eventLocation,
+      functionType: nextFunctionType !== undefined ? nextFunctionType : existing.functionType,
+      guestCount: nextGuestCount != null ? parseInt(nextGuestCount, 10) : existing.guestCount,
+      notes: nextNotes !== undefined ? nextNotes : existing.notes,
       discountAmount: new Prisma.Decimal(String(discount)),
       serviceChargePct: new Prisma.Decimal(String(sc)),
       taxPct: new Prisma.Decimal(String(txp)),
@@ -503,6 +577,229 @@ async function patchBooking(req, res) {
     return successResponse(res, "Booking updated", serializeBooking(updated));
   } catch (e) {
     console.error("patchBooking:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
+ * PATCH /v1/bookings/:id/updateEvent/:eventId — update a single event safely
+ */
+async function updateEvent(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+    const eventId = req.params.eventId;
+    const body = req.body || {};
+
+    const existing = await loadBookingForBusiness(bookingId, businessId, {
+      includePayments: true,
+    });
+    if (!existing) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    if (existing.status === "CANCELLED") {
+      return errorResponse(res, "Cancelled booking cannot be updated", 422, "VALIDATION_ERROR");
+    }
+    if (existing.status !== "DRAFT") {
+      return errorResponse(
+        res,
+        "Confirmed booking is locked for event/menu updates.",
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    if (body.updated_at) {
+      const clientUpdatedAt = new Date(body.updated_at).toISOString();
+      const serverUpdatedAt = new Date(existing.updatedAt).toISOString();
+      if (clientUpdatedAt !== serverUpdatedAt) {
+        return errorResponse(
+          res,
+          "This booking changed on another device. Please refresh before saving.",
+          409,
+          "WRITE_CONFLICT",
+        );
+      }
+    }
+
+    const current = (existing.events || []).find((ev) => ev.id === eventId);
+    if (!current) {
+      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+    }
+
+    await prisma.bookingEvent.update({
+      where: { id: eventId },
+      data: {
+        eventAt:
+          body.event_at !== undefined ? (body.event_at ? new Date(body.event_at) : null) : current.eventAt,
+        eventLocation:
+          body.event_location !== undefined ? body.event_location : current.eventLocation,
+        functionType:
+          body.function_type !== undefined ? body.function_type : current.functionType,
+        guestCount:
+          body.guest_count !== undefined
+            ? (body.guest_count != null ? parseInt(body.guest_count, 10) : null)
+            : current.guestCount,
+        notes: body.notes !== undefined ? body.notes : current.notes,
+        status: body.status !== undefined ? body.status : current.status,
+        dishId: body.dish_id !== undefined ? body.dish_id : current.dishId,
+        parentDishId:
+          body.parent_dish_id !== undefined ? body.parent_dish_id : current.parentDishId,
+        isTemplate: body.is_template !== undefined ? body.is_template : current.isTemplate,
+        eventSnapshot:
+          body.event_snapshot !== undefined ? body.event_snapshot : current.eventSnapshot,
+        eventTotal:
+          body.event_total !== undefined
+            ? (body.event_total != null ? new Prisma.Decimal(String(body.event_total)) : null)
+            : current.eventTotal,
+      },
+    });
+
+    if (body.step_number != null) {
+      await prisma.booking.update({
+        where: { id: bookingId },
+        data: {
+          stepNumber: Math.min(5, Math.max(1, parseInt(body.step_number, 10) || 1)),
+        },
+      });
+    }
+
+    const updated = await loadBookingForBusiness(bookingId, businessId, {
+      includePayments: true,
+    });
+    return successResponse(res, "Event updated", serializeBooking(updated));
+  } catch (e) {
+    console.error("updateEvent:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
+ * POST /v1/bookings/:id/createEvent — create single event in draft booking
+ */
+async function createEvent(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+    const body = req.body || {};
+
+    const existing = await loadBookingForBusiness(bookingId, businessId, {
+      includePayments: true,
+    });
+    if (!existing) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    if (existing.status === "CANCELLED") {
+      return errorResponse(res, "Cancelled booking cannot be updated", 422, "VALIDATION_ERROR");
+    }
+    if (existing.status !== "DRAFT") {
+      return errorResponse(
+        res,
+        "Confirmed booking is locked for event/menu updates.",
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    if (body.updated_at) {
+      const clientUpdatedAt = new Date(body.updated_at).toISOString();
+      const serverUpdatedAt = new Date(existing.updatedAt).toISOString();
+      if (clientUpdatedAt !== serverUpdatedAt) {
+        return errorResponse(
+          res,
+          "This booking changed on another device. Please refresh before saving.",
+          409,
+          "WRITE_CONFLICT",
+        );
+      }
+    }
+
+    await prisma.bookingEvent.create({
+      data: {
+        bookingId,
+        eventAt: body.event_at ? new Date(body.event_at) : null,
+        eventLocation: body.event_location ?? null,
+        functionType: body.function_type ?? null,
+        guestCount: body.guest_count != null ? parseInt(body.guest_count, 10) : null,
+        notes: body.notes ?? null,
+        status: body.status ?? "PENDING",
+        dishId: body.dish_id ?? null,
+        parentDishId: body.parent_dish_id ?? null,
+        isTemplate: body.is_template ?? null,
+        eventSnapshot: body.event_snapshot ?? null,
+        eventTotal:
+          body.event_total != null ? new Prisma.Decimal(String(body.event_total)) : null,
+      },
+    });
+
+    if (body.step_number != null) {
+      await prisma.booking.update({
+        where: { id: bookingId },
+        data: {
+          stepNumber: Math.min(5, Math.max(1, parseInt(body.step_number, 10) || 1)),
+        },
+      });
+    }
+
+    const updated = await loadBookingForBusiness(bookingId, businessId, {
+      includePayments: true,
+    });
+    return successResponse(res, "Event created", serializeBooking(updated));
+  } catch (e) {
+    console.error("createEvent:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
+ * DELETE /v1/bookings/:id/deleteEvent/:eventId — delete single event
+ */
+async function deleteEvent(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+    const eventId = req.params.eventId;
+
+    const existing = await loadBookingForBusiness(bookingId, businessId, {
+      includePayments: true,
+    });
+    if (!existing) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    if (existing.status === "CANCELLED") {
+      return errorResponse(res, "Cancelled booking cannot be updated", 422, "VALIDATION_ERROR");
+    }
+    if (existing.status !== "DRAFT") {
+      return errorResponse(
+        res,
+        "Confirmed booking is locked for event/menu updates.",
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const currentEvents = existing.events || [];
+    const target = currentEvents.find((ev) => ev.id === eventId);
+    if (!target) {
+      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+    }
+    if (currentEvents.length <= 1) {
+      return errorResponse(
+        res,
+        "Cannot delete the last event. Delete booking instead.",
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    await prisma.bookingEvent.delete({ where: { id: eventId } });
+
+    const updated = await loadBookingForBusiness(bookingId, businessId, {
+      includePayments: true,
+    });
+    return successResponse(res, "Event deleted", serializeBooking(updated));
+  } catch (e) {
+    console.error("deleteEvent:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
 }
@@ -597,7 +894,7 @@ async function getBooking(req, res) {
 }
 
 /**
- * DELETE /v1/bookings/:id
+ * DELETE /v1/deleteBooking/:id
  * Deletes a draft booking for current business.
  */
 async function deleteBooking(req, res) {
@@ -712,7 +1009,7 @@ async function confirmBooking(req, res) {
 }
 
 /**
- * POST /v1/bookings/:id/payments
+ * POST /v1/bookigrecordPayment/:id
  */
 async function recordPayment(req, res) {
   try {
@@ -808,13 +1105,14 @@ async function triggerBookingPdfJobs(req, res) {
 }
 
 /**
- * POST /v1/bookings/:id/pdf-jobs/:jobId/retry
+ * POST /v1/retryBookingPdfJob/:id/:jobId
  * Placeholder retry endpoint for PDF pipeline.
  */
 async function retryBookingPdfJob(req, res) {
   try {
     const businessId = req.businessId;
     const bookingId = req.params.id;
+    const jobId = req.params.jobId;
     const existing = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
       select: { id: true },
@@ -822,7 +1120,7 @@ async function retryBookingPdfJob(req, res) {
     if (!existing) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
-    return successResponse(res, "PDF job retry queued", { ok: true });
+    return successResponse(res, "PDF job retry queued", { ok: true, job_id: jobId ?? null });
   } catch (e) {
     console.error("retryBookingPdfJob:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
@@ -832,6 +1130,9 @@ async function retryBookingPdfJob(req, res) {
 module.exports = {
   createBooking,
   patchBooking,
+  createEvent,
+  updateEvent,
+  deleteEvent,
   listBookings,
   getBooking,
   deleteBooking,

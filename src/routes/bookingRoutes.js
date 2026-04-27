@@ -5,6 +5,9 @@ const businessContextMiddleware = require("../middleware/businessContextMiddlewa
 const {
   createBooking,
   patchBooking,
+  createEvent,
+  updateEvent,
+  deleteEvent,
   listBookings,
   getBooking,
   deleteBooking,
@@ -14,31 +17,97 @@ const {
   retryBookingPdfJob,
 } = require("../controllers/bookingController");
 
-router.post("/v1/bookings", authMiddleware, businessContextMiddleware, createBooking);
-router.patch("/v1/bookings/:id", authMiddleware, businessContextMiddleware, patchBooking);
-router.delete("/v1/bookings/:id", authMiddleware, businessContextMiddleware, deleteBooking);
-router.get("/v1/bookings", authMiddleware, businessContextMiddleware, listBookings);
-router.get("/v1/bookings/:id", authMiddleware, businessContextMiddleware, getBooking);
+// Create Booking
+router.post(
+  "/v1/createBooking",
+  authMiddleware,
+  businessContextMiddleware,
+  createBooking,
+);
+
+// Update Booking
+router.post(
+  "/v1/updateBooking/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  patchBooking,
+);
+
+// Delete Booking
+router.delete(
+  "/v1/deleteBooking/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  deleteBooking,
+);
+
+// List Bookings
+router.get(
+  "/v1/listBookings",
+  authMiddleware,
+  businessContextMiddleware,
+  listBookings,
+);
+
+// Get Booking
+router.get(
+  "/v1/getBooking/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  getBooking,
+);
+
+// Confirm Booking
 router.post(
   "/v1/bookings/:id/confirm",
   authMiddleware,
   businessContextMiddleware,
   confirmBooking,
 );
+
+// Update Booking Event
 router.post(
-  "/v1/bookings/:id/payments",
+  "/v1/bookings/:id/createEvent",
+  authMiddleware,
+  businessContextMiddleware,
+  createEvent,
+);
+
+// Update Booking Event
+router.patch(
+  "/v1/bookings/:id/updateEvent/:eventId",
+  authMiddleware,
+  businessContextMiddleware,
+  updateEvent,
+);
+
+// Delete Booking Event
+router.delete(
+  "/v1/bookings/:id/deleteEvent/:eventId",
+  authMiddleware,
+  businessContextMiddleware,
+  deleteEvent,
+);
+
+// Record Payment
+router.post(
+  "/v1/bookigrecordPayment/:id",
   authMiddleware,
   businessContextMiddleware,
   recordPayment,
 );
+
+// Trigger Booking PDF Jobs
 router.post(
-  "/v1/bookings/:id/pdf-jobs",
+  "/v1/triggerBookingPdfJobs/:id",
   authMiddleware,
   businessContextMiddleware,
   triggerBookingPdfJobs,
 );
+
+// Retry Booking PDF Job
 router.post(
-  "/v1/bookings/:id/pdf-jobs/:jobId/retry",
+  "/v1/retryBookingPdfJob/:id/:jobId",
   authMiddleware,
   businessContextMiddleware,
   retryBookingPdfJob,
