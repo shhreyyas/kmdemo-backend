@@ -317,7 +317,7 @@ Allows an authenticated user to register a business. Currently, each user can re
 
 > **Internal:** `created_by` must be set from the authenticated user's ID when inserting into the database.
 
-**Endpoint:** `POST /business`  
+**Endpoint:** `POST /v1/registerBusiness`  
 **Auth:** Required — Bearer token in `Authorization` header.
 
 **Request Body:**
@@ -350,7 +350,7 @@ Allows an authenticated user to register a business. Currently, each user can re
 | `contact_number` | Yes | |
 | `business_email` | No | |
 | `business_address` | Yes | |
-| `service_types` | Yes | Multi-select; use slugs from `/service-types` |
+| `service_types` | Yes | Multi-select; use slugs from `/v1/getservicetypes` |
 | `catering_types` | Yes | Multi-select: `veg`, `non_veg` |
 | `years_of_experience` | Yes | Integer |
 | `business_register_number` | No | |
@@ -412,7 +412,7 @@ Allows an authenticated user to register a business. Currently, each user can re
 
 Returns the list of available service type options used when registering a business.
 
-**Endpoint:** `GET /service-types`  
+**Endpoint:** `GET /v1/getservicetypes`  
 **Auth:** Not required.
 
 **Success Response — `200 OK`:**

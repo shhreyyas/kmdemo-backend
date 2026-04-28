@@ -96,6 +96,63 @@ function serializeBookingEvent(ev) {
   };
 }
 
+async function enrichEventSnapshotMenuImages(booking) {
+  if (!booking || !Array.isArray(booking.events) || booking.events.length === 0) {
+    return booking;
+  }
+
+  const idSet = new Set();
+  for (const ev of booking.events) {
+    const rows = ev?.eventSnapshot?.menu_items;
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      const id = String(row?.id ?? "").trim();
+      if (id) idSet.add(id);
+    }
+  }
+
+  if (idSet.size === 0) return booking;
+
+  const snapshotImageByMenuId = new Map();
+  for (const mi of booking.menuItems || []) {
+    const mid = String(mi?.menuItemId ?? "").trim();
+    if (!mid) continue;
+    if (mi?.imageUrlSnapshot) {
+      snapshotImageByMenuId.set(mid, mi.imageUrlSnapshot);
+    }
+  }
+
+  const menuRows = await prisma.menuItem.findMany({
+    where: { id: { in: [...idSet] } },
+    select: { id: true, imageUrl: true },
+  });
+  const liveImageByMenuId = new Map(menuRows.map((m) => [m.id, m.imageUrl || null]));
+
+  const enrichedEvents = booking.events.map((ev) => {
+    const snapshot = ev?.eventSnapshot;
+    if (!snapshot || !Array.isArray(snapshot.menu_items)) return ev;
+    const enrichedMenuItems = snapshot.menu_items.map((row) => {
+      if (row?.image_url) return row;
+      const id = String(row?.id ?? "").trim();
+      if (!id) return row;
+      const imageUrl = snapshotImageByMenuId.get(id) || liveImageByMenuId.get(id) || null;
+      return imageUrl ? { ...row, image_url: imageUrl } : row;
+    });
+    return {
+      ...ev,
+      eventSnapshot: {
+        ...snapshot,
+        menu_items: enrichedMenuItems,
+      },
+    };
+  });
+
+  return {
+    ...booking,
+    events: enrichedEvents,
+  };
+}
+
 async function generateUniqueBookingCode(tx, businessId) {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const n = Math.floor(Math.random() * 1000);
@@ -299,7 +356,7 @@ async function patchBooking(req, res) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
-      return errorResponse(res, "Cancelled booking cannot be updated", 422, "VALIDATION_ERROR");
+      return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
     }
 
     // Optimistic concurrency guard (plan: updated_at conflict check).
@@ -343,7 +400,7 @@ async function patchBooking(req, res) {
         return errorResponse(
           res,
           "Confirmed booking is locked for event/menu updates.",
-          422,
+          200,
           "VALIDATION_ERROR",
         );
       }
@@ -354,7 +411,7 @@ async function patchBooking(req, res) {
         return errorResponse(
           res,
           "Menu can no longer be edited for this event date",
-          422,
+          200,
           "VALIDATION_ERROR",
         );
       }
@@ -386,7 +443,7 @@ async function patchBooking(req, res) {
         where: { id: { in: ids } },
       });
       if (menus.length !== ids.length) {
-        return errorResponse(res, "One or more menu items not found", 422, "VALIDATION_ERROR");
+        return errorResponse(res, "One or more menu items not found", 200, "VALIDATION_ERROR");
       }
       for (const m of menus) {
         if (!canViewMenuItem(m, businessId, userId)) {
@@ -521,7 +578,7 @@ async function patchBooking(req, res) {
       return errorResponse(
         res,
         "Recorded payments exceed the new total. Adjust before changing the booking.",
-        422,
+        200,
         "VALIDATION_ERROR",
       );
     }
@@ -598,13 +655,13 @@ async function updateEvent(req, res) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
-      return errorResponse(res, "Cancelled booking cannot be updated", 422, "VALIDATION_ERROR");
+      return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
     }
     if (existing.status !== "DRAFT") {
       return errorResponse(
         res,
         "Confirmed booking is locked for event/menu updates.",
-        422,
+        200,
         "VALIDATION_ERROR",
       );
     }
@@ -690,13 +747,13 @@ async function createEvent(req, res) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
-      return errorResponse(res, "Cancelled booking cannot be updated", 422, "VALIDATION_ERROR");
+      return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
     }
     if (existing.status !== "DRAFT") {
       return errorResponse(
         res,
         "Confirmed booking is locked for event/menu updates.",
-        422,
+        200,
         "VALIDATION_ERROR",
       );
     }
@@ -767,13 +824,13 @@ async function deleteEvent(req, res) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
-      return errorResponse(res, "Cancelled booking cannot be updated", 422, "VALIDATION_ERROR");
+      return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
     }
     if (existing.status !== "DRAFT") {
       return errorResponse(
         res,
         "Confirmed booking is locked for event/menu updates.",
-        422,
+        200,
         "VALIDATION_ERROR",
       );
     }
@@ -787,7 +844,7 @@ async function deleteEvent(req, res) {
       return errorResponse(
         res,
         "Cannot delete the last event. Delete booking instead.",
-        422,
+        200,
         "VALIDATION_ERROR",
       );
     }
@@ -886,7 +943,8 @@ async function getBooking(req, res) {
     if (!row) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
-    return successResponse(res, "OK", serializeBooking(row));
+    const enrichedRow = await enrichEventSnapshotMenuImages(row);
+    return successResponse(res, "OK", serializeBooking(enrichedRow));
   } catch (e) {
     console.error("getBooking:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
@@ -913,7 +971,7 @@ async function deleteBooking(req, res) {
       return errorResponse(
         res,
         "Only draft bookings can be deleted",
-        422,
+        200,
         "VALIDATION_ERROR",
       );
     }
@@ -950,7 +1008,7 @@ async function confirmBooking(req, res) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
     if (existing.status !== "DRAFT") {
-      return errorResponse(res, "Booking is not a draft", 422, "VALIDATION_ERROR");
+      return errorResponse(res, "Booking is not a draft", 200, "VALIDATION_ERROR");
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -1020,10 +1078,10 @@ async function recordPayment(req, res) {
     const method = body.method;
 
     if (!method || !["CASH", "UPI", "BANK_TRANSFER"].includes(method)) {
-      return errorResponse(res, "Invalid payment method", 422, "VALIDATION_ERROR");
+      return errorResponse(res, "Invalid payment method", 200, "VALIDATION_ERROR");
     }
     if (amount <= 0) {
-      return errorResponse(res, "Amount must be positive", 422, "VALIDATION_ERROR");
+      return errorResponse(res, "Amount must be positive", 200, "VALIDATION_ERROR");
     }
 
     const existing = await prisma.booking.findFirst({
@@ -1033,7 +1091,7 @@ async function recordPayment(req, res) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
     if (existing.status !== "CONFIRMED") {
-      return errorResponse(res, "Payments only for confirmed bookings", 422, "VALIDATION_ERROR");
+      return errorResponse(res, "Payments only for confirmed bookings", 200, "VALIDATION_ERROR");
     }
 
     const totalDue = num(existing.totalDue);
@@ -1043,7 +1101,7 @@ async function recordPayment(req, res) {
       return errorResponse(
         res,
         "Amount exceeds remaining balance",
-        422,
+        200,
         "VALIDATION_ERROR",
         `Maximum payable: ${remaining.toFixed(2)}`,
       );

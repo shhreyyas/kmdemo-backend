@@ -11,18 +11,18 @@ const { uploadBusinessImage } = require("../controllers/uploadController");
 const authMiddleware = require("../middleware/authMiddleware");
 const businessContextMiddleware = require("../middleware/businessContextMiddleware");
 
-router.get("/service-types", listServiceTypes);
-router.post("/service-types", authMiddleware, createServiceTypes);
+router.get("/v1/getservicetypes", listServiceTypes);
+router.post("/v1/createServiceTypes", authMiddleware, createServiceTypes);
 router.post("/v1/upload-business-image", authMiddleware, uploadBusinessImage);
-router.post("/business", authMiddleware, registerBusiness);
+router.post("/v1/registerBusiness", authMiddleware, registerBusiness);
 router.patch(
-  "/business",
+  "/v1/updateBusiness",
   authMiddleware,
   businessContextMiddleware,
   updateBusiness,
 );
 router.delete(
-  "/business",
+  "/v1/deleteBusiness",
   authMiddleware,
   businessContextMiddleware,
   deleteBusiness,
