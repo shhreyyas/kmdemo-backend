@@ -863,6 +863,105 @@ async function deleteEvent(req, res) {
   }
 }
 
+/** Earliest event time for a booking, or legacy booking.eventAt (matches dashboard bucketing). */
+function deriveBookingEventMs(b) {
+  const evs = b.events || [];
+  let best = NaN;
+  for (const ev of evs) {
+    if (!ev.eventAt) continue;
+    const t = new Date(ev.eventAt).getTime();
+    if (!Number.isNaN(t)) {
+      if (Number.isNaN(best) || t < best) best = t;
+    }
+  }
+  if (!Number.isNaN(best)) return best;
+  if (b.eventAt) {
+    const t = new Date(b.eventAt).getTime();
+    return Number.isNaN(t) ? NaN : t;
+  }
+  return NaN;
+}
+
+/**
+ * GET /v1/dashboard — home-tab aggregates for the mobile app.
+ */
+async function getDashboard(req, res) {
+  try {
+    const businessId = req.businessId;
+
+    const [confirmedRows, draftCount] = await Promise.all([
+      prisma.booking.findMany({
+        where: { businessId, status: "CONFIRMED" },
+        orderBy: { createdAt: "desc" },
+        take: 500,
+        include: {
+          menuItems: true,
+          events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+          payments: { orderBy: { createdAt: "desc" }, take: 5 },
+        },
+      }),
+      prisma.booking.count({ where: { businessId, status: "DRAFT" } }),
+    ]);
+
+    const now = new Date();
+    const startToday = new Date(now);
+    startToday.setHours(0, 0, 0, 0);
+    const endToday = new Date(startToday);
+    endToday.setDate(endToday.getDate() + 1);
+    const endTwoDay = new Date(startToday);
+    endTwoDay.setDate(endTwoDay.getDate() + 2);
+
+    const paymentDueTotal = confirmedRows.reduce((sum, b) => {
+      const outstanding = Math.max(0, num(b.totalDue) - num(b.amountPaid));
+      return sum + outstanding;
+    }, 0);
+
+    const todayRaw = [];
+    const twoDayRaw = [];
+    const upcomingRaw = [];
+    const completedRaw = [];
+
+    for (const b of confirmedRows) {
+      const t = deriveBookingEventMs(b);
+      if (Number.isNaN(t)) continue;
+      if (t >= startToday.getTime() && t < endToday.getTime()) {
+        todayRaw.push({ b, t });
+      }
+      if (t >= startToday.getTime() && t < endTwoDay.getTime()) {
+        twoDayRaw.push({ b, t });
+      }
+      if (t >= endToday.getTime()) {
+        upcomingRaw.push({ b, t });
+      }
+      if (t < startToday.getTime()) {
+        completedRaw.push({ b, t });
+      }
+    }
+
+    todayRaw.sort((a, b) => a.t - b.t);
+    upcomingRaw.sort((a, b) => a.t - b.t);
+    completedRaw.sort((a, b) => b.t - a.t);
+
+    const ordersToPrepare = twoDayRaw.filter(({ t }) => t >= now.getTime()).length;
+
+    const payload = {
+      today_event_count: todayRaw.length,
+      two_day_event_count: twoDayRaw.length,
+      draft_count: draftCount,
+      payment_due_total: paymentDueTotal,
+      orders_to_prepare_count: ordersToPrepare,
+      today_timeline: todayRaw.map(({ b }) => serializeBooking(b)),
+      upcoming_bookings: upcomingRaw.slice(0, 5).map(({ b }) => serializeBooking(b)),
+      completed_orders: completedRaw.slice(0, 5).map(({ b }) => serializeBooking(b)),
+    };
+
+    return successResponse(res, "OK", payload);
+  } catch (e) {
+    console.error("getDashboard:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 /**
  * GET /v1/bookings
  */
@@ -1193,6 +1292,7 @@ module.exports = {
   createEvent,
   updateEvent,
   deleteEvent,
+  getDashboard,
   listBookings,
   getBooking,
   deleteBooking,
