@@ -1,5 +1,10 @@
 const prisma = require("../config/prisma");
 const { successResponse, errorResponse } = require("../utils/response");
+const {
+  getRequestedLanguage,
+  normalizeLocalizedName,
+  resolveLocalizedName,
+} = require("../utils/localization");
 
 function slugify(raw) {
   const s = String(raw ?? "")
@@ -26,10 +31,10 @@ async function ensureUniqueSlug(base, excludeId) {
   return `${root}-${Date.now()}`;
 }
 
-function formatCategory(row) {
+function formatCategory(row, requestedLanguage = "en") {
   return {
     id: row.id,
-    name: row.name,
+    name: resolveLocalizedName(row.name, requestedLanguage),
     slug: row.slug,
     sort_order: row.sortOrder,
     is_active: row.isActive,
@@ -41,15 +46,16 @@ function formatCategory(row) {
 /** Public list for the app: active categories only, ordered. */
 exports.getCategory = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const rows = await prisma.menuCategory.findMany({
       where: { isActive: true },
-      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      orderBy: [{ sortOrder: "asc" }, { slug: "asc" }],
     });
 
     return successResponse(
       res,
       "Categories fetched successfully",
-      { categories: rows.map(formatCategory) },
+      { categories: rows.map((row) => formatCategory(row, requestedLanguage)) },
       200,
     );
   } catch (error) {
@@ -60,17 +66,21 @@ exports.getCategory = async (req, res) => {
 
 exports.createCategory = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const { name, slug, sort_order, is_active } = req.body;
 
-    if (!name || typeof name !== "string" || !name.trim()) {
+    const normalizedName = normalizeLocalizedName(name);
+    if (!normalizedName) {
       return errorResponse(res, "name is required", 200, "VALIDATION_ERROR");
     }
 
-    const finalSlug = await ensureUniqueSlug(slug != null && slug !== "" ? slug : name);
+    const finalSlug = await ensureUniqueSlug(
+      slug != null && slug !== "" ? slug : normalizedName.en,
+    );
 
     const row = await prisma.menuCategory.create({
       data: {
-        name: name.trim(),
+        name: normalizedName,
         slug: finalSlug,
         sortOrder:
           sort_order !== undefined && Number.isFinite(Number(sort_order))
@@ -80,7 +90,12 @@ exports.createCategory = async (req, res) => {
       },
     });
 
-    return successResponse(res, "Category created successfully", formatCategory(row), 200);
+    return successResponse(
+      res,
+      "Category created successfully",
+      formatCategory(row, requestedLanguage),
+      200,
+    );
   } catch (error) {
     console.error("createCategory error:", error.message);
     if (error.code === "P2002") {
@@ -92,6 +107,7 @@ exports.createCategory = async (req, res) => {
 
 exports.updateCategory = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const { id } = req.params;
     const { name, slug, sort_order, is_active } = req.body;
 
@@ -102,16 +118,20 @@ exports.updateCategory = async (req, res) => {
 
     const data = {};
     if (name !== undefined) {
-      if (typeof name !== "string" || !name.trim()) {
+      const normalizedName = normalizeLocalizedName(name);
+      if (!normalizedName) {
         return errorResponse(res, "name must be a non-empty string", 200, "VALIDATION_ERROR");
       }
-      data.name = name.trim();
+      data.name = normalizedName;
     }
     if (slug !== undefined) {
       const nextSlug =
         slug != null && String(slug).trim() !== ""
           ? await ensureUniqueSlug(slug, id)
-          : await ensureUniqueSlug(data.name ?? existing.name, id);
+          : await ensureUniqueSlug(
+              (data.name ? resolveLocalizedName(data.name, "en") : resolveLocalizedName(existing.name, "en")) || "category",
+              id,
+            );
       data.slug = nextSlug;
     }
     if (sort_order !== undefined) {
@@ -136,7 +156,12 @@ exports.updateCategory = async (req, res) => {
       data,
     });
 
-    return successResponse(res, "Category updated successfully", formatCategory(row), 200);
+    return successResponse(
+      res,
+      "Category updated successfully",
+      formatCategory(row, requestedLanguage),
+      200,
+    );
   } catch (error) {
     console.error("updateCategory error:", error.message);
     if (error.code === "P2002") {

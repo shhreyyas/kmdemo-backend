@@ -2,49 +2,95 @@ const prisma = require("../config/prisma");
 const jwt = require("jsonwebtoken");
 const { successResponse, errorResponse } = require("../utils/response");
 const { formatBusinessDetail } = require("./authController");
+const {
+  getRequestedLanguage,
+  normalizeLocalizedName,
+  resolveLocalizedName,
+} = require("../utils/localization");
 
 const TRIAL_DAYS = 30;
 
 const ALLOWED_CATERING = new Set(["veg", "non_veg"]);
-
 /**
- * POST /api/service-types
+ * POST /api/v1/createServiceTypes
  * Body: { names: ["Live Counter", "Outdoor Catering"] }
  * Auth: required
  * Creates service types that don't already exist and returns all of them.
  */
 exports.createServiceTypes = async (req, res) => {
   try {
-    const { names } = req.body;
+    const requestedLanguage = getRequestedLanguage(req);
+    const { names, items } = req.body;
 
-    if (!Array.isArray(names) || names.length === 0) {
-      return errorResponse(res, "names array is required", 422, "VALIDATION_ERROR");
+    const rawItems = Array.isArray(items) && items.length > 0
+      ? items
+      : Array.isArray(names)
+        ? names
+        : [];
+
+    if (rawItems.length === 0) {
+      return errorResponse(
+        res,
+        "items or names array is required",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
-    const trimmed = names
-      .map((n) => (typeof n === "string" ? n.trim() : ""))
-      .filter((n) => n.length > 0);
+    const normalizedItems = rawItems
+      .map((entry) => {
+        if (typeof entry === "string") {
+          return { name: normalizeLocalizedName(entry) };
+        }
+        const localized = normalizeLocalizedName(entry?.name);
+        if (!localized) return null;
 
-    if (trimmed.length === 0) {
-      return errorResponse(res, "At least one non-empty name is required", 422, "VALIDATION_ERROR");
+        return {
+          name: localized,
+          slug:
+            typeof entry.slug === "string" && entry.slug.trim()
+              ? entry.slug.trim()
+              : undefined,
+          icon:
+            typeof entry.icon === "string" && entry.icon.trim()
+              ? entry.icon.trim()
+              : null,
+          status: Number(entry.status) === 0 ? 0 : 1,
+        };
+      })
+      .filter(Boolean);
+
+    if (normalizedItems.length === 0) {
+      return errorResponse(
+        res,
+        "At least one non-empty name is required",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
     const results = [];
 
-    for (const name of trimmed) {
-      let slug = name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+    for (const item of normalizedItems) {
+      const slugSource = item.slug || item.name.en;
+      let slug = slugSource.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
       if (!slug) slug = `custom-${Date.now()}`;
 
       // Use upsert to avoid unique constraint race conditions
       const row = await prisma.serviceType.upsert({
         where: { slug },
         update: {},              // already exists — do nothing
-        create: { name, slug, status: 1 },
+        create: {
+          name: item.name,
+          slug,
+          icon: item.icon,
+          status: item.status,
+        },
       });
 
       results.push({
         id: row.id,
-        name: row.name,
+        name: resolveLocalizedName(row.name, requestedLanguage),
         slug: row.slug,
         icon: row.icon,
         status: row.status,
@@ -60,6 +106,7 @@ exports.createServiceTypes = async (req, res) => {
 
 exports.listServiceTypes = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const rows = await prisma.serviceType.findMany({
       where: { status: 1 },
       orderBy: { id: "asc" },
@@ -67,7 +114,7 @@ exports.listServiceTypes = async (req, res) => {
 
     const data = rows.map((r) => ({
       id: r.id,
-      name: r.name,
+      name: resolveLocalizedName(r.name, requestedLanguage),
       slug: r.slug,
       icon: r.icon,
       status: r.status,
@@ -185,7 +232,7 @@ exports.registerBusiness = async (req, res) => {
           "One or more required fields are missing or malformed",
           200,
           "VALIDATION_ERROR",
-          "Invalid service_types slug(s). Use values from GET /service-types.",
+          "Invalid service_types slug(s). Use values from GET /v1/getservicetypes.",
         );
       }
     }
@@ -404,7 +451,7 @@ exports.updateBusiness = async (req, res) => {
 };
 
 /**
- * DELETE /api/business
+ * DELETE /api/v1/deleteBusiness
  * Auth + business context required.
  * Fully removes the business and all related data (cascade).
  * Unlinks all users from the business first.

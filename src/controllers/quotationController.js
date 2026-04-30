@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const { Prisma } = require("@prisma/client");
 const { successResponse, errorResponse } = require("../utils/response");
+const { getRequestedLanguage, resolveLocalizedName } = require("../utils/localization");
 
 function deriveIsGlobal(businessId, createdByUserId) {
   if (businessId == null || businessId === "") return true;
@@ -77,6 +78,7 @@ function serializeQuotation(q) {
 
 async function createQuotation(req, res) {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const businessId = req.businessId;
     const userId = req.user?.userId;
     const body = req.body || {};
@@ -144,7 +146,7 @@ async function createQuotation(req, res) {
         quotationId: created.id,
         menuItemId: m.id,
         pricePerPlateSnapshot: m.pricePerPerson,
-        nameSnapshot: m.name,
+        nameSnapshot: resolveLocalizedName(m.name, requestedLanguage),
       }));
       if (rows.length) {
         await tx.quotationMenuItem.createMany({ data: rows });
@@ -210,6 +212,7 @@ async function getQuotation(req, res) {
 
 async function updateQuotation(req, res) {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const businessId = req.businessId;
     const userId = req.user?.userId;
     const id = req.params.id;
@@ -266,7 +269,7 @@ async function updateQuotation(req, res) {
           quotationId: id,
           menuItemId: m.id,
           pricePerPlateSnapshot: m.pricePerPerson,
-          nameSnapshot: m.name,
+          nameSnapshot: resolveLocalizedName(m.name, requestedLanguage),
         }));
         if (rows.length) await tx.quotationMenuItem.createMany({ data: rows });
       }

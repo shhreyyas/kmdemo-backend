@@ -1,79 +1,19 @@
 const prisma = require("../config/prisma");
 const { Prisma } = require("@prisma/client");
 const { successResponse, errorResponse } = require("../utils/response");
+const {
+  getRequestedLanguage,
+  normalizeLocalizedName,
+  resolveLocalizedName,
+} = require("../utils/localization");
 
 const FOOD_TYPES = new Set(["veg", "non_veg"]);
 
-/** When MenuItem.category string does not match any MenuCategory row (legacy rows). */
-function slugFallbackFromStoredLabel(name) {
-  const s = String(name ?? "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return s || "category";
-}
-
-/**
- * DB column `MenuItem.category` may wrongly store a JSON string, e.g.
- * `'{"name":"Biryani","slug":"biryani"}'`. Parse it so API returns clean `{ name, slug }`.
- * Also unwraps double-encoded `name` (nested JSON string).
- */
-function tryParseEmbeddedCategoryJson(stored) {
-  const s = String(stored ?? "").trim();
-  if (!s.startsWith("{")) return null;
-  try {
-    const p = JSON.parse(s);
-    if (!p || typeof p !== "object") return null;
-    let name = p.name != null ? String(p.name) : "";
-    let slug = p.slug != null ? String(p.slug) : "";
-    if (name.trim().startsWith("{")) {
-      const inner = tryParseEmbeddedCategoryJson(name);
-      if (inner) {
-        name = inner.name;
-        slug = inner.slug || slug;
-      }
-    }
-    name = name.trim();
-    slug = slug.trim();
-    if (name && slug) return { name, slug };
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-/** Stable legacy form for rows that stored `category` as JSON.stringify({ name, slug }). */
-function categoryJsonBlob(catRow) {
-  return JSON.stringify({ name: catRow.name, slug: catRow.slug });
-}
-
-/** Persist plain slug (or unchanged label) instead of a JSON blob if the client sends embedded JSON. */
-function normalizeCategoryForStorage(categoryTrim) {
-  const embedded = tryParseEmbeddedCategoryJson(categoryTrim);
-  if (embedded != null) return embedded.slug;
-  return categoryTrim;
-}
-
-/** Loads active categories once; resolves stored DB string (slug or display name) to `{ name, slug }`. */
-async function createCategoryResolver() {
-  const cats = await prisma.menuCategory.findMany({
-    where: { isActive: true },
-    select: { name: true, slug: true },
+async function loadCategoryBySlug(slug) {
+  return prisma.menuCategory.findUnique({
+    where: { slug },
+    select: { slug: true, name: true },
   });
-  const bySlug = new Map(cats.map((c) => [c.slug, c]));
-  const byNameLower = new Map(cats.map((c) => [c.name.toLowerCase(), c]));
-  return function resolveCategory(stored) {
-    const s = String(stored ?? "").trim();
-    if (s === "") {
-      return { name: "Other", slug: "other" };
-    }
-    const slugHit = bySlug.get(s);
-    if (slugHit) return { name: slugHit.name, slug: slugHit.slug };
-    const nameHit = byNameLower.get(s.toLowerCase());
-    if (nameHit) return { name: nameHit.name, slug: nameHit.slug };
-    return { name: s, slug: slugFallbackFromStoredLabel(s) };
-  };
 }
 
 /**
@@ -142,6 +82,24 @@ async function findIdsMatchingIngredientNames(searchTerm, orBranches) {
   return visible.map((r) => r.id);
 }
 
+async function findIdsMatchingLocalizedNames(searchTerm, orBranches) {
+  const rows = await prisma.$queryRaw`
+    SELECT DISTINCT m.id
+    FROM "MenuItem" m,
+    LATERAL jsonb_each_text(COALESCE(m."name"::jsonb, '{}'::jsonb)) AS n(lang, val)
+    WHERE POSITION(LOWER(${searchTerm}) IN LOWER(n.val)) > 0
+  `;
+  const ids = rows.map((r) => r.id);
+  if (ids.length === 0) return [];
+  const visible = await prisma.menuItem.findMany({
+    where: {
+      AND: [{ OR: orBranches }, { id: { in: ids } }],
+    },
+    select: { id: true },
+  });
+  return visible.map((r) => r.id);
+}
+
 function sumIngredientCosts(ingredients) {
   let sum = 0;
   for (const i of ingredients) {
@@ -154,7 +112,7 @@ function sumIngredientCosts(ingredients) {
 
 function formatMenuItem(
   row,
-  { includeFinancials = true, resolveCategory } = {},
+  { includeFinancials = true, language = "en" } = {},
 ) {
   const ingredients = normalizeIngredients(row.ingredients);
   const price = Number(row.pricePerPerson);
@@ -162,26 +120,14 @@ function formatMenuItem(
   const profit = price - estimated_cost;
   const profit_margin = price === 0 ? 0 : (profit / price) * 100;
 
-  const embedded = tryParseEmbeddedCategoryJson(row.category);
-  let category;
-  if (embedded != null && typeof resolveCategory === "function") {
-    const canonical = resolveCategory(embedded.slug);
-    category = {
-      name: embedded.name || canonical.name,
-      slug: canonical.slug || embedded.slug,
-    };
-  } else if (typeof resolveCategory === "function") {
-    category = resolveCategory(row.category);
-  } else {
-    category = {
-      name: row.category,
-      slug: slugFallbackFromStoredLabel(row.category),
-    };
-  }
+  const category = {
+    name: resolveLocalizedName(row.category?.name, language),
+    slug: row.category?.slug ?? row.categorySlug,
+  };
 
   const base = {
     _id: row.id,
-    name: row.name,
+    name: resolveLocalizedName(row.name, language),
     description: row.description ?? null,
     how_to_make: row.howToMake ?? null,
     price_per_person: price,
@@ -208,6 +154,7 @@ function formatMenuItem(
 
 exports.createMenuItem = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const userId = req.user.userId;
     const businessId = req.businessId;
 
@@ -215,6 +162,7 @@ exports.createMenuItem = async (req, res) => {
       name,
       price_per_person,
       category,
+      category_slug,
       food_type,
       ingredients,
       image_url,
@@ -238,10 +186,8 @@ exports.createMenuItem = async (req, res) => {
 
     if (
       !name ||
-      typeof name !== "string" ||
       price_per_person === undefined ||
-      category == null ||
-      typeof category !== "string" ||
+      (category_slug == null && category == null) ||
       !food_type ||
       typeof food_type !== "string"
     ) {
@@ -250,7 +196,39 @@ exports.createMenuItem = async (req, res) => {
         "Missing or invalid request fields",
         422,
         "VALIDATION_ERROR",
-        "name, price_per_person, category, and food_type are required.",
+        "name, price_per_person, category/category_slug, and food_type are required.",
+      );
+    }
+    const normalizedName = normalizeLocalizedName(name);
+    if (!normalizedName) {
+      return errorResponse(
+        res,
+        "Missing or invalid request fields",
+        422,
+        "VALIDATION_ERROR",
+        "name must be a non-empty string or localized object.",
+      );
+    }
+    const categorySlug = String(category_slug ?? category ?? "")
+      .trim()
+      .toLowerCase();
+    if (!categorySlug) {
+      return errorResponse(
+        res,
+        "Missing or invalid request fields",
+        422,
+        "VALIDATION_ERROR",
+        "category_slug is required.",
+      );
+    }
+    const categoryRow = await loadCategoryBySlug(categorySlug);
+    if (!categoryRow) {
+      return errorResponse(
+        res,
+        "Missing or invalid request fields",
+        422,
+        "VALIDATION_ERROR",
+        "category_slug must match an active menu category slug.",
       );
     }
 
@@ -351,11 +329,11 @@ exports.createMenuItem = async (req, res) => {
 
     const created = await prisma.menuItem.create({
       data: {
-        name: name.trim(),
+        name: normalizedName,
         description: resolvedDescription,
         howToMake: resolvedHowToMake,
         pricePerPerson: new Prisma.Decimal(String(price)),
-        category: normalizeCategoryForStorage(category.trim()),
+        categorySlug: categoryRow.slug,
         foodType: food_type,
         businessId,
         createdByUserId: userId,
@@ -364,13 +342,16 @@ exports.createMenuItem = async (req, res) => {
         ingredients: ing,
         imageUrl: resolvedImageUrl,
       },
+      include: { category: true },
     });
 
-    const resolveCategory = await createCategoryResolver();
     return successResponse(
       res,
       "Menu item created successfully",
-      formatMenuItem(created, { includeFinancials: false, resolveCategory }),
+      formatMenuItem(created, {
+        includeFinancials: false,
+        language: requestedLanguage,
+      }),
       201,
     );
   } catch (error) {
@@ -381,10 +362,11 @@ exports.createMenuItem = async (req, res) => {
 
 exports.listMenuItems = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const userId = req.user.userId;
     const businessId = req.businessId;
 
-    const { category, categories, food_type, search, q, self_only } = req.query;
+    const { category, categories, food_type, search, q, self_only, exclude_self } = req.query;
 
     const visibilityOr = [{ isGlobal: true }, { createdByUserId: userId }];
 
@@ -461,38 +443,32 @@ exports.listMenuItems = async (req, res) => {
 
     const selfOnly =
       String(self_only ?? "").toLowerCase() === "true" || self_only === "1";
+    const excludeSelf =
+      String(exclude_self ?? "").toLowerCase() === "true" || exclude_self === "1";
 
     const filterAnd = [];
     if (categorySlugs.length > 0) {
       const orCategoryBranches = [];
       for (const slug of categorySlugs) {
-        const catRow = await prisma.menuCategory.findFirst({
-          where: {
-            isActive: true,
-            OR: [
-              { slug },
-              { name: { equals: slug, mode: "insensitive" } },
-            ],
-          },
-        });
-        if (catRow) {
-          orCategoryBranches.push({
-            OR: [
-              { category: catRow.slug },
-              { category: catRow.name },
-              { category: categoryJsonBlob(catRow) },
-            ],
-          });
-        } else {
-          orCategoryBranches.push({ category: slug });
-        }
+        orCategoryBranches.push({ categorySlug: slug });
       }
       if (orCategoryBranches.length > 0) {
         filterAnd.push({ OR: orCategoryBranches });
       }
     }
     if (selfOnly) {
+      // "Self" tab should only show user-created private items.
       filterAnd.push({ createdByUserId: userId });
+      filterAnd.push({ isGlobal: false });
+      filterAnd.push({ businessId });
+    } else if (excludeSelf) {
+      // "All" tab should hide only self-added private items,
+      // but still include global/catalog rows even if createdByUserId matches.
+      filterAnd.push({
+        NOT: {
+          AND: [{ createdByUserId: userId }, { isGlobal: false }, { businessId }],
+        },
+      });
     }
     if (foodTypeTrim != null) {
       filterAnd.push({ foodType: foodTypeTrim });
@@ -500,9 +476,12 @@ exports.listMenuItems = async (req, res) => {
     if (searchTerm !== "") {
       // Search only: dish name, or any ingredient’s `name` inside ingredients[].
       const searchOr = [
-        { name: { contains: searchTerm, mode: "insensitive" } },
         { description: { contains: searchTerm, mode: "insensitive" } },
       ];
+      const nameMatchIds = await findIdsMatchingLocalizedNames(searchTerm, orBranches);
+      if (nameMatchIds.length > 0) {
+        searchOr.push({ id: { in: nameMatchIds } });
+      }
 
       const ingredientNameIds = await findIdsMatchingIngredientNames(
         searchTerm,
@@ -529,14 +508,14 @@ exports.listMenuItems = async (req, res) => {
 
     const rows = await prisma.menuItem.findMany({
       where,
-      orderBy: [{ category: "asc" }, { name: "asc" }],
+      orderBy: [{ categorySlug: "asc" }, { updatedAt: "desc" }],
       skip,
       take: perPage,
+      include: { category: true },
     });
 
-    const resolveCategory = await createCategoryResolver();
     const data = rows.map((row) =>
-      formatMenuItem(row, { includeFinancials: true, resolveCategory }),
+      formatMenuItem(row, { includeFinancials: true, language: requestedLanguage }),
     );
 
     return successResponse(res, "Menu items fetched successfully", data, 200, {
@@ -557,12 +536,14 @@ exports.listMenuItems = async (req, res) => {
 
 exports.getMenuItem = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const userId = req.user.userId;
     const businessId = req.businessId;
     const { id } = req.params;
 
     const menu = await prisma.menuItem.findUnique({
       where: { id },
+      include: { category: true },
     });
 
     if (!menu) {
@@ -585,11 +566,10 @@ exports.getMenuItem = async (req, res) => {
       );
     }
 
-    const resolveCategory = await createCategoryResolver();
     return successResponse(
       res,
       "Menu item fetched successfully",
-      formatMenuItem(menu, { includeFinancials: true, resolveCategory }),
+      formatMenuItem(menu, { includeFinancials: true, language: requestedLanguage }),
       200,
     );
   } catch (error) {
@@ -600,6 +580,7 @@ exports.getMenuItem = async (req, res) => {
 
 exports.updateMenuItem = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const userId = req.user.userId;
     const businessId = req.businessId;
     const { id } = req.params;
@@ -643,6 +624,7 @@ exports.updateMenuItem = async (req, res) => {
       name,
       price_per_person,
       category,
+      category_slug,
       food_type,
       ingredients,
       image_url,
@@ -653,16 +635,17 @@ exports.updateMenuItem = async (req, res) => {
     const updates = {};
 
     if (name !== undefined) {
-      if (typeof name !== "string" || !name.trim()) {
+      const normalizedName = normalizeLocalizedName(name);
+      if (!normalizedName) {
         return errorResponse(
           res,
           "Missing or invalid request fields",
           422,
           "VALIDATION_ERROR",
-          "name must be a non-empty string.",
+          "name must be a non-empty string or localized object.",
         );
       }
-      updates.name = name.trim();
+      updates.name = normalizedName;
     }
     if (price_per_person !== undefined) {
       const price = Number(price_per_person);
@@ -677,17 +660,30 @@ exports.updateMenuItem = async (req, res) => {
       }
       updates.pricePerPerson = new Prisma.Decimal(String(price));
     }
-    if (category !== undefined) {
-      if (typeof category !== "string" || !category.trim()) {
+    if (category !== undefined || category_slug !== undefined) {
+      const slug = String(category_slug ?? category ?? "")
+        .trim()
+        .toLowerCase();
+      if (!slug) {
         return errorResponse(
           res,
           "Missing or invalid request fields",
           422,
           "VALIDATION_ERROR",
-          "category must be a non-empty string.",
+          "category_slug must be a non-empty string.",
         );
       }
-      updates.category = normalizeCategoryForStorage(category.trim());
+      const categoryRow = await loadCategoryBySlug(slug);
+      if (!categoryRow) {
+        return errorResponse(
+          res,
+          "Missing or invalid request fields",
+          422,
+          "VALIDATION_ERROR",
+          "category_slug must match an existing menu category.",
+        );
+      }
+      updates.categorySlug = categoryRow.slug;
     }
     if (food_type !== undefined) {
       if (!FOOD_TYPES.has(food_type)) {
@@ -813,7 +809,7 @@ exports.updateMenuItem = async (req, res) => {
           pricePerPerson:
             updates.pricePerPerson ??
             menu.pricePerPerson,
-          category: updates.category ?? menu.category,
+          categorySlug: updates.categorySlug ?? menu.categorySlug,
           foodType: updates.foodType ?? menu.foodType,
           businessId,
           createdByUserId: userId,
@@ -823,13 +819,16 @@ exports.updateMenuItem = async (req, res) => {
           imageUrl:
             updates.imageUrl !== undefined ? updates.imageUrl : menu.imageUrl ?? null,
         },
+        include: { category: true },
       });
 
-      const resolveCategory = await createCategoryResolver();
       return successResponse(
         res,
         "Menu item updated successfully",
-        formatMenuItem(newItem, { includeFinancials: false, resolveCategory }),
+        formatMenuItem(newItem, {
+          includeFinancials: false,
+          language: requestedLanguage,
+        }),
         201,
       );
     }
@@ -837,13 +836,16 @@ exports.updateMenuItem = async (req, res) => {
     const updated = await prisma.menuItem.update({
       where: { id: menu.id },
       data: updates,
+      include: { category: true },
     });
 
-    const resolveCategoryUpdated = await createCategoryResolver();
     return successResponse(
       res,
       "Menu item updated successfully",
-      formatMenuItem(updated, { includeFinancials: false, resolveCategory: resolveCategoryUpdated }),
+      formatMenuItem(updated, {
+        includeFinancials: false,
+        language: requestedLanguage,
+      }),
       200,
     );
   } catch (error) {
