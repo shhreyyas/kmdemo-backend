@@ -2,6 +2,7 @@ const prisma = require("../config/prisma");
 const { Prisma } = require("@prisma/client");
 const { successResponse, errorResponse } = require("../utils/response");
 const { sendBookingConfirmationEmail } = require("../utils/email");
+const { getRequestedLanguage, resolveLocalizedName } = require("../utils/localization");
 
 function deriveIsGlobal(businessId, createdByUserId) {
   if (businessId == null || businessId === "") return true;
@@ -344,6 +345,7 @@ async function createBooking(req, res) {
  */
 async function patchBooking(req, res) {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const businessId = req.businessId;
     const userId = req.user?.userId;
     const bookingId = req.params.id;
@@ -460,7 +462,7 @@ async function patchBooking(req, res) {
           menuItemId: m.id,
           quantity: line.qty,
           pricePerPlateSnapshot: m.pricePerPerson,
-          nameSnapshot: m.name,
+          nameSnapshot: resolveLocalizedName(m.name, requestedLanguage),
           imageUrlSnapshot: m.imageUrl,
         };
       });

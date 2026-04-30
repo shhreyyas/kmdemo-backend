@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const { Prisma } = require("@prisma/client");
 const { successResponse, errorResponse } = require("../utils/response");
+const { getRequestedLanguage, resolveLocalizedName } = require("../utils/localization");
 
 function num(v) {
   const n = typeof v === "number" ? v : Number(v);
@@ -20,14 +21,14 @@ function parseIngredients(ingredients) {
   return [];
 }
 
-function buildDishHowToMake(menuItems) {
+function buildDishHowToMake(menuItems, language) {
   return (menuItems || [])
     .map((row) => {
       const howToMake = String(row.menuItem?.howToMake ?? "").trim();
       if (!howToMake) return null;
       return {
         menu_item_id: row.menuItem.id,
-        menu_item_name: row.menuItem.name,
+        menu_item_name: resolveLocalizedName(row.menuItem.name, language),
         instructions: howToMake,
       };
     })
@@ -66,7 +67,10 @@ function buildTotalRequiredIngredients(menuItems) {
 
 function serializeDish(dish, options = {}) {
   const includeComputed = options.includeComputed === true;
-  const howToMake = includeComputed ? buildDishHowToMake(dish.menuItems || []) : undefined;
+  const language = options.language || "en";
+  const howToMake = includeComputed
+    ? buildDishHowToMake(dish.menuItems || [], language)
+    : undefined;
   const totalRequiredIngredients = includeComputed
     ? buildTotalRequiredIngredients(dish.menuItems || [])
     : undefined;
@@ -84,9 +88,12 @@ function serializeDish(dish, options = {}) {
       menu_item: row.menuItem
         ? {
             id: row.menuItem.id,
-            name: row.menuItem.name,
+            name: resolveLocalizedName(row.menuItem.name, language),
             price_per_person: num(row.menuItem.pricePerPerson),
-            category: row.menuItem.category,
+            category: {
+              name: resolveLocalizedName(row.menuItem.category?.name, language),
+              slug: row.menuItem.category?.slug ?? row.menuItem.categorySlug,
+            },
             image_url: row.menuItem.imageUrl ?? null,
             how_to_make: row.menuItem.howToMake ?? null,
           }
@@ -105,6 +112,7 @@ function serializeDish(dish, options = {}) {
 
 async function listDishes(req, res) {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const businessId = req.businessId;
     const q = String(req.query?.q ?? "").trim();
     const page = Math.max(1, parseInt(String(req.query?.page ?? "1"), 10) || 1);
@@ -133,7 +141,7 @@ async function listDishes(req, res) {
         take: perPage,
         include: {
           menuItems: {
-            include: { menuItem: true },
+            include: { menuItem: { include: { category: true } } },
             orderBy: { createdAt: "asc" },
           },
         },
@@ -142,7 +150,7 @@ async function listDishes(req, res) {
     ]);
     const lastPage = Math.max(1, Math.ceil(total / perPage));
     return successResponse(res, "OK", {
-      items: rows.map(serializeDish),
+      items: rows.map((row) => serializeDish(row, { language: requestedLanguage })),
       pagination: {
         total,
         page,
@@ -157,19 +165,24 @@ async function listDishes(req, res) {
 
 async function getDish(req, res) {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const businessId = req.businessId;
     const id = req.params.id;
     const row = await prisma.dish.findFirst({
       where: { id, businessId },
       include: {
         menuItems: {
-          include: { menuItem: true },
+          include: { menuItem: { include: { category: true } } },
           orderBy: { createdAt: "asc" },
         },
       },
     });
     if (!row) return errorResponse(res, "Dish not found", 404, "NOT_FOUND");
-    return successResponse(res, "OK", serializeDish(row, { includeComputed: true }));
+    return successResponse(
+      res,
+      "OK",
+      serializeDish(row, { includeComputed: true, language: requestedLanguage }),
+    );
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
@@ -177,6 +190,7 @@ async function getDish(req, res) {
 
 async function createDish(req, res) {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const businessId = req.businessId;
     const body = req.body || {};
     const name = String(body.name ?? "").trim();
@@ -218,10 +232,15 @@ async function createDish(req, res) {
       });
       return tx.dish.findUnique({
         where: { id: created.id },
-        include: { menuItems: { include: { menuItem: true }, orderBy: { createdAt: "asc" } } },
+        include: {
+          menuItems: {
+            include: { menuItem: { include: { category: true } } },
+            orderBy: { createdAt: "asc" },
+          },
+        },
       });
     });
-    return successResponse(res, "Dish created", serializeDish(dish));
+    return successResponse(res, "Dish created", serializeDish(dish, { language: requestedLanguage }));
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
@@ -229,6 +248,7 @@ async function createDish(req, res) {
 
 async function updateDish(req, res) {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const businessId = req.businessId;
     const id = req.params.id;
     const body = req.body || {};
@@ -271,10 +291,13 @@ async function updateDish(req, res) {
     const updated = await prisma.dish.findUnique({
       where: { id },
       include: {
-        menuItems: { include: { menuItem: true }, orderBy: { createdAt: "asc" } },
+        menuItems: {
+          include: { menuItem: { include: { category: true } } },
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
-    return successResponse(res, "Dish updated", serializeDish(updated));
+    return successResponse(res, "Dish updated", serializeDish(updated, { language: requestedLanguage }));
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }

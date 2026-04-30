@@ -2,68 +2,15 @@ const prisma = require("../config/prisma");
 const jwt = require("jsonwebtoken");
 const { successResponse, errorResponse } = require("../utils/response");
 const { formatBusinessDetail } = require("./authController");
+const {
+  getRequestedLanguage,
+  normalizeLocalizedName,
+  resolveLocalizedName,
+} = require("../utils/localization");
 
 const TRIAL_DAYS = 30;
 
 const ALLOWED_CATERING = new Set(["veg", "non_veg"]);
-const SUPPORTED_SERVICE_TYPE_LANGS = new Set(["en", "hi", "gu"]);
-
-function normalizeLanguageCode(raw) {
-  if (typeof raw !== "string" || !raw.trim()) return "en";
-  const base = raw.trim().toLowerCase().split(",")[0].split(";")[0].replace("_", "-");
-  const primary = base.split("-")[0];
-  return SUPPORTED_SERVICE_TYPE_LANGS.has(primary) ? primary : "en";
-}
-
-function getRequestedLanguage(req) {
-  return normalizeLanguageCode(
-    req.headers["x-language"] || req.headers["accept-language"] || "en",
-  );
-}
-
-function normalizeLocalizedName(input) {
-  if (typeof input === "string") {
-    const trimmed = input.trim();
-    return trimmed ? { en: trimmed } : null;
-  }
-
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    return null;
-  }
-
-  const out = {};
-  for (const [rawLang, rawValue] of Object.entries(input)) {
-    const lang = normalizeLanguageCode(rawLang);
-    if (!SUPPORTED_SERVICE_TYPE_LANGS.has(lang)) continue;
-    const value = typeof rawValue === "string" ? rawValue.trim() : "";
-    if (value) out[lang] = value;
-  }
-
-  const keys = Object.keys(out);
-  if (keys.length === 0) return null;
-  if (!out.en) out.en = out[keys[0]];
-  return out;
-}
-
-function resolveLocalizedName(nameValue, language) {
-  if (typeof nameValue === "string") return nameValue;
-  if (!nameValue || typeof nameValue !== "object" || Array.isArray(nameValue)) {
-    return "";
-  }
-
-  if (typeof nameValue[language] === "string" && nameValue[language].trim()) {
-    return nameValue[language].trim();
-  }
-  if (typeof nameValue.en === "string" && nameValue.en.trim()) {
-    return nameValue.en.trim();
-  }
-
-  for (const value of Object.values(nameValue)) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
 /**
  * POST /api/v1/createServiceTypes
  * Body: { names: ["Live Counter", "Outdoor Catering"] }
