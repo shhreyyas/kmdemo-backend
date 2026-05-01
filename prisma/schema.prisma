@@ -64,6 +64,7 @@ model Business {
   dishes       Dish[]
   bookings     Booking[]
   quotations   Quotation[]
+  supplyItems SupplyItem[]
   billingSubscriptions BillingSubscription[]
   billingPaymentEvents BillingPaymentEvent[]
 }
@@ -251,6 +252,18 @@ enum EventStatus {
   COMPLETED
 }
 
+enum SupplyItemType {
+  INGREDIENT
+  UTENSIL
+}
+
+enum SupplyItemCategory {
+  VEGETABLES
+  DAIRY
+  GROCERIES
+  UTENSILS
+}
+
 enum QuotationStatus {
   DRAFT
   SENT
@@ -289,6 +302,7 @@ model Booking {
   paymentStatus       PaymentStatus @default(PENDING)
 
   menuItems BookingMenuItem[]
+  supplyItems BookingSupplyItem[]
   payments  PaymentTransaction[]
   events    BookingEvent[]
 
@@ -318,6 +332,7 @@ model BookingEvent {
   updatedAt    DateTime    @updatedAt
 
   booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  supplyItems BookingEventSupplyItem[]
 
   @@index([bookingId])
   @@index([bookingId, eventAt])
@@ -337,6 +352,64 @@ model BookingMenuItem {
 
   @@unique([bookingId, menuItemId])
   @@index([bookingId])
+}
+
+model SupplyItem {
+  id             String @id @default(uuid())
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  type           SupplyItemType
+  category       SupplyItemCategory
+  name           Json
+  unitOptions    String[] @default([])
+  defaultUnit    String
+  availableCount Int?
+  photoUrl       String?
+  isActive       Boolean @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bookingSupplyItems BookingSupplyItem[]
+  bookingEventSupplyItems BookingEventSupplyItem[]
+
+  @@index([businessId, type, category, isActive])
+}
+
+model BookingSupplyItem {
+  id             String @id @default(uuid())
+  bookingId      String
+  supplyItemId   String
+  quantity       Int @default(1)
+  unit           String
+  category       SupplyItemCategory
+  nameSnapshot   Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  booking      Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  supplyItem   SupplyItem   @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
+
+  @@unique([bookingId, supplyItemId])
+  @@index([bookingId, category])
+}
+
+model BookingEventSupplyItem {
+  id             String @id @default(uuid())
+  bookingEventId String
+  supplyItemId   String
+  itemType       SupplyItemType
+  quantity       Int @default(1)
+  unit           String
+  category       SupplyItemCategory
+  nameSnapshot   Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bookingEvent BookingEvent @relation(fields: [bookingEventId], references: [id], onDelete: Cascade)
+  supplyItem   SupplyItem   @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
+
+  @@unique([bookingEventId, supplyItemId])
+  @@index([bookingEventId, itemType])
 }
 
 model Dish {

@@ -50,6 +50,9 @@ app.use("/api", contactRoutes);
 const appVersionRoutes = require("./routes/appVersionRoutes");
 app.use("/api", appVersionRoutes);
 
+const supplyRoutes = require("./routes/supplyRoutes");
+app.use("/api", supplyRoutes);
+
 // Test Route
 app.get("/", (req, res) => {
   res.send("Catering API Running");
