@@ -11,6 +11,7 @@ const {
   getDashboard,
   listBookings,
   getBooking,
+  completeBookingOrder,
   deleteBooking,
   confirmBooking,
   recordPayment,
@@ -72,6 +73,14 @@ router.post(
   authMiddleware,
   businessContextMiddleware,
   confirmBooking,
+);
+
+// Mark booking order manually completed
+router.post(
+  "/v1/bookings/:id/completeOrder",
+  authMiddleware,
+  businessContextMiddleware,
+  completeBookingOrder,
 );
 
 // Update Booking Event

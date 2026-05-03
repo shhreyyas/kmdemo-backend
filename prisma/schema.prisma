@@ -64,6 +64,8 @@ model Business {
   dishes       Dish[]
   bookings     Booking[]
   quotations   Quotation[]
+  supplyItems SupplyItem[]
+  supplySavedLists SupplySavedList[]
   billingSubscriptions BillingSubscription[]
   billingPaymentEvents BillingPaymentEvent[]
 }
@@ -137,6 +139,8 @@ model User {
   devices           UserDevice[]
   businessesCreated Business[] @relation("BusinessCreatedBy")
   menuItemsCreated  MenuItem[]
+  supplyItemsCreated SupplyItem[]
+  supplySavedListsCreated SupplySavedList[] @relation("SupplySavedListCreator")
   contactMessages   ContactMessage[]
 }
 
@@ -251,6 +255,11 @@ enum EventStatus {
   COMPLETED
 }
 
+enum SupplyItemType {
+  INGREDIENT
+  UTENSIL
+}
+
 enum QuotationStatus {
   DRAFT
   SENT
@@ -289,8 +298,12 @@ model Booking {
   paymentStatus       PaymentStatus @default(PENDING)
 
   menuItems BookingMenuItem[]
+  supplyItems BookingSupplyItem[]
   payments  PaymentTransaction[]
   events    BookingEvent[]
+
+  /// Set when the caterer marks the booking as completed in the app (dashboard / history).
+  completedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -298,6 +311,7 @@ model Booking {
   @@unique([businessId, bookingCode])
   @@index([businessId, status])
   @@index([businessId, eventAt])
+  @@index([businessId, completedAt])
 }
 
 model BookingEvent {
@@ -318,6 +332,8 @@ model BookingEvent {
   updatedAt    DateTime    @updatedAt
 
   booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  supplyItems BookingEventSupplyItem[]
+  supplySavedLists SupplySavedList[]
 
   @@index([bookingId])
   @@index([bookingId, eventAt])
@@ -337,6 +353,95 @@ model BookingMenuItem {
 
   @@unique([bookingId, menuItemId])
   @@index([bookingId])
+}
+
+model SupplyItem {
+  id             String @id @default(uuid())
+  businessId     String?
+  business       Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdByUserId String?
+  createdBy       User?     @relation(fields: [createdByUserId], references: [id])
+  /// false only when both businessId and createdByUserId are set; otherwise true (catalog / import).
+  isGlobal       Boolean  @default(false)
+  type           SupplyItemType
+  categorySlug   String
+  category       SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
+  name           Json
+  unitOptions    String[] @default([])
+  defaultUnit    String
+  availableCount Int?
+  photoUrl       String?
+  isActive       Boolean @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bookingSupplyItems BookingSupplyItem[]
+  bookingEventSupplyItems BookingEventSupplyItem[]
+  supplySavedListItems SupplySavedListItem[]
+
+  @@index([businessId])
+  @@index([createdByUserId])
+  @@index([isGlobal])
+  @@index([businessId, type, categorySlug, isActive])
+  @@index([categorySlug])
+}
+
+model BookingSupplyItem {
+  id             String @id @default(uuid())
+  bookingId      String
+  supplyItemId   String
+  quantity       Int @default(1)
+  unit           String
+  categorySlug   String
+  category       SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
+  nameSnapshot   Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  booking      Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  supplyItem   SupplyItem   @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
+
+  @@unique([bookingId, supplyItemId])
+  @@index([bookingId, categorySlug])
+  @@index([categorySlug])
+}
+
+model BookingEventSupplyItem {
+  id             String @id @default(uuid())
+  bookingEventId String
+  supplyItemId   String
+  itemType       SupplyItemType
+  quantity       Int @default(1)
+  unit           String
+  categorySlug   String
+  category       SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
+  nameSnapshot   Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bookingEvent BookingEvent @relation(fields: [bookingEventId], references: [id], onDelete: Cascade)
+  supplyItem   SupplyItem   @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
+
+  @@unique([bookingEventId, supplyItemId])
+  @@index([bookingEventId, itemType])
+  @@index([categorySlug])
+}
+
+/// Supply categories are admin-managed and referenced by slug from supply tables.
+model SupplyItemCategory {
+  id        String   @id @default(uuid())
+  name      Json
+  slug      String   @unique
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  supplyItems           SupplyItem[]
+  bookingSupplyItems    BookingSupplyItem[]
+  bookingEventSupplyItems BookingEventSupplyItem[]
+
+  @@index([isActive, sortOrder])
 }
 
 model Dish {
@@ -423,4 +528,40 @@ model QuotationMenuItem {
 
   @@unique([quotationId, menuItemId])
   @@index([quotationId])
+}
+
+/// Caterer-owned persisted ingredient supply lists (standalone MVP; not tied to bookings unless linked).
+model SupplySavedList {
+  id               String   @id @default(uuid())
+  businessId       String
+  business         Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdByUserId  String?
+  createdBy        User?    @relation("SupplySavedListCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  title            String   @db.VarChar(512)
+  bookingEventId   String?
+  bookingEvent     BookingEvent? @relation(fields: [bookingEventId], references: [id], onDelete: SetNull)
+  categoriesLabel  String?  @db.VarChar(512)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  items            SupplySavedListItem[]
+
+  @@index([businessId, createdAt(sort: Desc)])
+  @@index([bookingEventId])
+}
+
+model SupplySavedListItem {
+  id             String @id @default(uuid())
+  listId         String
+  list           SupplySavedList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  supplyItemId   String
+  supplyItem     SupplyItem @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
+  quantity       Int
+  unit           String
+  categorySlug   String
+  nameSnapshot   Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([listId])
+  @@index([supplyItemId])
 }

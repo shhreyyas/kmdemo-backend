@@ -48,6 +48,48 @@ function normalizeIngredients(raw) {
   return raw;
 }
 
+/** Same visibility branches as `supplyController.listSupplyItems`. */
+function supplyVisibilityOrBranchesForIngredients(businessId, userId) {
+  return [
+    { businessId, OR: [{ isGlobal: true }, { createdByUserId: userId }] },
+    { businessId: null, OR: [{ createdByUserId: userId }, { isGlobal: true }] },
+    { createdByUserId: userId },
+  ];
+}
+
+/**
+ * When ingredient rows include `supply_item_id`, ensure each ID refers to an
+ * active INGREDIENT supply row visible to this business (same rules as catalog list).
+ */
+async function validateIngredientSupplyRefs(ingredients, businessId, userId) {
+  const rows = normalizeIngredients(ingredients);
+  const ids = [
+    ...new Set(
+      rows
+        .map((r) => {
+          const raw = r?.supply_item_id ?? r?.supplyItemId;
+          return typeof raw === "string" ? raw.trim() : "";
+        })
+        .filter(Boolean),
+    ),
+  ];
+  if (ids.length === 0) return null;
+  const count = await prisma.supplyItem.count({
+    where: {
+      AND: [
+        { OR: supplyVisibilityOrBranchesForIngredients(businessId, userId) },
+        { id: { in: ids } },
+        { isActive: true },
+        { type: "INGREDIENT" },
+      ],
+    },
+  });
+  if (count !== ids.length) {
+    return "One or more supply_item_id values are invalid, inactive, or not visible for this business.";
+  }
+  return null;
+}
+
 function hasValidIngredients(raw) {
   const arr = normalizeIngredients(raw);
   if (!arr.length) return false;
@@ -261,6 +303,20 @@ exports.createMenuItem = async (req, res) => {
         422,
         "VALIDATION_ERROR",
         "ingredients are required and each row must have name, qty (>0), and unit.",
+      );
+    }
+    const ingSupplyErr = await validateIngredientSupplyRefs(
+      ing,
+      businessId,
+      userId,
+    );
+    if (ingSupplyErr) {
+      return errorResponse(
+        res,
+        "Missing or invalid request fields",
+        422,
+        "VALIDATION_ERROR",
+        ingSupplyErr,
       );
     }
 
@@ -714,6 +770,20 @@ exports.updateMenuItem = async (req, res) => {
           422,
           "VALIDATION_ERROR",
           "ingredients are required and each row must have name, qty (>0), and unit.",
+        );
+      }
+      const ingSupplyErr = await validateIngredientSupplyRefs(
+        ingredients,
+        businessId,
+        userId,
+      );
+      if (ingSupplyErr) {
+        return errorResponse(
+          res,
+          "Missing or invalid request fields",
+          422,
+          "VALIDATION_ERROR",
+          ingSupplyErr,
         );
       }
       updates.ingredients = ingredients;

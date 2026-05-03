@@ -1,0 +1,149 @@
+const express = require("express");
+const router = express.Router();
+const authMiddleware = require("../middleware/authMiddleware");
+const businessContextMiddleware = require("../middleware/businessContextMiddleware");
+const {
+  createSupplyItem,
+  listSupplyItems,
+  listSupplyItemCategories,
+  updateSupplyItem,
+  deleteSupplyItem,
+  setBookingSupplyItems,
+  getBookingSupplyItems,
+  setEventSupplyItems,
+  getEventSupplyItems,
+  getSuggestedEventSupplyFromMenu,
+  updateEventSupplyItem,
+  deleteEventSupplyItem,
+  shareBookingSupplyItems,
+  shareEventSupplyItems,
+  generateSupplyListPdf,
+} = require("../controllers/supplyController");
+const {
+  createSupplySavedList,
+  listSupplySavedLists,
+  getSupplySavedList,
+  updateSupplySavedList,
+} = require("../controllers/supplySavedListController");
+
+router.post(
+  "/v1/createSupplyItem",
+  authMiddleware,
+  businessContextMiddleware,
+  createSupplyItem,
+);
+router.get(
+  "/v1/listSupplyItems",
+  authMiddleware,
+  businessContextMiddleware,
+  listSupplyItems,
+);
+router.get(
+  "/v1/listSupplyItemCategories",
+  authMiddleware,
+  businessContextMiddleware,
+  listSupplyItemCategories,
+);
+router.put(
+  "/v1/updateSupplyItem/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  updateSupplyItem,
+);
+router.delete(
+  "/v1/deleteSupplyItem/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  deleteSupplyItem,
+);
+
+router.post(
+  "/v1/bookings/:id/setSupplyItems",
+  authMiddleware,
+  businessContextMiddleware,
+  setBookingSupplyItems,
+);
+router.get(
+  "/v1/bookings/:id/supplyItems",
+  authMiddleware,
+  businessContextMiddleware,
+  getBookingSupplyItems,
+);
+
+router.post(
+  "/v1/bookings/:id/events/:eventId/setSupplyItems",
+  authMiddleware,
+  businessContextMiddleware,
+  setEventSupplyItems,
+);
+router.get(
+  "/v1/bookings/:id/events/:eventId/supplyItems",
+  authMiddleware,
+  businessContextMiddleware,
+  getEventSupplyItems,
+);
+router.get(
+  "/v1/bookings/:id/events/:eventId/suggestedSupplyFromMenu",
+  authMiddleware,
+  businessContextMiddleware,
+  getSuggestedEventSupplyFromMenu,
+);
+router.patch(
+  "/v1/bookings/:id/events/:eventId/supplyItems/:supplyItemId",
+  authMiddleware,
+  businessContextMiddleware,
+  updateEventSupplyItem,
+);
+router.delete(
+  "/v1/bookings/:id/events/:eventId/supplyItems/:supplyItemId",
+  authMiddleware,
+  businessContextMiddleware,
+  deleteEventSupplyItem,
+);
+
+router.post(
+  "/v1/bookings/:id/supplyItems/share",
+  authMiddleware,
+  businessContextMiddleware,
+  shareBookingSupplyItems,
+);
+router.post(
+  "/v1/bookings/:id/events/:eventId/supplyItems/share",
+  authMiddleware,
+  businessContextMiddleware,
+  shareEventSupplyItems,
+);
+
+router.post(
+  "/v1/generateSupplyListPdf",
+  authMiddleware,
+  businessContextMiddleware,
+  generateSupplyListPdf,
+);
+
+router.post(
+  "/v1/supplySavedLists",
+  authMiddleware,
+  businessContextMiddleware,
+  createSupplySavedList,
+);
+router.get(
+  "/v1/supplySavedLists",
+  authMiddleware,
+  businessContextMiddleware,
+  listSupplySavedLists,
+);
+router.get(
+  "/v1/supplySavedLists/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  getSupplySavedList,
+);
+router.patch(
+  "/v1/supplySavedLists/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  updateSupplySavedList,
+);
+
+module.exports = router;
