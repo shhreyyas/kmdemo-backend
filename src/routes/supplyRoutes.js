@@ -5,17 +5,26 @@ const businessContextMiddleware = require("../middleware/businessContextMiddlewa
 const {
   createSupplyItem,
   listSupplyItems,
+  listSupplyItemCategories,
   updateSupplyItem,
   deleteSupplyItem,
   setBookingSupplyItems,
   getBookingSupplyItems,
   setEventSupplyItems,
   getEventSupplyItems,
+  getSuggestedEventSupplyFromMenu,
   updateEventSupplyItem,
   deleteEventSupplyItem,
   shareBookingSupplyItems,
   shareEventSupplyItems,
+  generateSupplyListPdf,
 } = require("../controllers/supplyController");
+const {
+  createSupplySavedList,
+  listSupplySavedLists,
+  getSupplySavedList,
+  updateSupplySavedList,
+} = require("../controllers/supplySavedListController");
 
 router.post(
   "/v1/createSupplyItem",
@@ -28,6 +37,12 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   listSupplyItems,
+);
+router.get(
+  "/v1/listSupplyItemCategories",
+  authMiddleware,
+  businessContextMiddleware,
+  listSupplyItemCategories,
 );
 router.put(
   "/v1/updateSupplyItem/:id",
@@ -67,6 +82,12 @@ router.get(
   businessContextMiddleware,
   getEventSupplyItems,
 );
+router.get(
+  "/v1/bookings/:id/events/:eventId/suggestedSupplyFromMenu",
+  authMiddleware,
+  businessContextMiddleware,
+  getSuggestedEventSupplyFromMenu,
+);
 router.patch(
   "/v1/bookings/:id/events/:eventId/supplyItems/:supplyItemId",
   authMiddleware,
@@ -91,6 +112,38 @@ router.post(
   authMiddleware,
   businessContextMiddleware,
   shareEventSupplyItems,
+);
+
+router.post(
+  "/v1/generateSupplyListPdf",
+  authMiddleware,
+  businessContextMiddleware,
+  generateSupplyListPdf,
+);
+
+router.post(
+  "/v1/supplySavedLists",
+  authMiddleware,
+  businessContextMiddleware,
+  createSupplySavedList,
+);
+router.get(
+  "/v1/supplySavedLists",
+  authMiddleware,
+  businessContextMiddleware,
+  listSupplySavedLists,
+);
+router.get(
+  "/v1/supplySavedLists/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  getSupplySavedList,
+);
+router.patch(
+  "/v1/supplySavedLists/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  updateSupplySavedList,
 );
 
 module.exports = router;

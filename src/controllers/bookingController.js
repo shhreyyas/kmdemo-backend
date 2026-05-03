@@ -58,15 +58,15 @@ function paymentStatusFromAmounts(amountPaid, totalDue) {
   return "PARTIAL";
 }
 
+/**
+ * Menu edits allowed only until 24h before the event start (same rule as the mobile app).
+ */
 function canEditMenuBeforeEvent(eventAt) {
   if (!eventAt) return true;
-  const eventDay = new Date(eventAt);
-  eventDay.setHours(0, 0, 0, 0);
-  const cutoff = new Date(eventDay.getTime());
-  cutoff.setDate(cutoff.getDate() - 1);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return today.getTime() < cutoff.getTime();
+  const start = new Date(eventAt).getTime();
+  if (Number.isNaN(start)) return true;
+  if (start <= Date.now()) return false;
+  return start - Date.now() > 24 * 60 * 60 * 1000;
 }
 
 function deriveEventSubtotal(ev) {
@@ -74,6 +74,43 @@ function deriveEventSubtotal(ev) {
   const guests = Math.max(0, Number(ev?.guestCount ?? 0) || 0);
   const snapshotPrice = Number(ev?.eventSnapshot?.price_per_plate ?? 0) || 0;
   return guests * snapshotPrice;
+}
+
+/**
+ * Food + booking-level service/tax/discount (aligned with app `getBookingPricingBreakdown`).
+ * Used when stored `totalDue` is 0 or too low — e.g. confirmBooking only priced root guestCount
+ * while multiple events each have their own totals.
+ */
+function computeBookingTotalDueFromEvents(booking) {
+  const events = booking.events || [];
+  let foodSum = 0;
+  for (const ev of events) {
+    foodSum += deriveEventSubtotal(ev);
+  }
+  if (foodSum <= 0) return 0;
+
+  let serviceAmt = num(booking.serviceChargeAmount);
+  const servicePct = num(booking.serviceChargePct);
+  if (serviceAmt <= 0 && servicePct > 0) {
+    serviceAmt = foodSum * (servicePct / 100);
+  }
+
+  let taxAmt = num(booking.taxAmount);
+  const taxPct = num(booking.taxPct);
+  if (taxAmt <= 0 && taxPct > 0) {
+    taxAmt = (foodSum + serviceAmt) * (taxPct / 100);
+  }
+
+  const disc = num(booking.discountAmount);
+  return Math.max(0, foodSum + serviceAmt + taxAmt - disc);
+}
+
+/** Prefer max(stored, event-derived) when events imply a higher balance than `booking.totalDue`. */
+function resolveTotalDueForPayment(booking) {
+  const stored = num(booking.totalDue);
+  const fromEvents = computeBookingTotalDueFromEvents(booking);
+  if (fromEvents > 0) return Math.max(stored, fromEvents);
+  return stored;
 }
 
 function serializeBookingEvent(ev) {
@@ -187,9 +224,29 @@ function serializeBooking(b, { includePayments = true } = {}) {
         }))
       : undefined;
 
-  const serializedEvents = (b.events || []).map(serializeBookingEvent);
+  let serializedEvents = (b.events || []).map(serializeBookingEvent);
   const hasEvents = serializedEvents.length > 0;
+  const bookingAtIso = b.eventAt?.toISOString?.() ?? b.eventAt ?? null;
+
+  if (hasEvents) {
+    const first = serializedEvents[0];
+    serializedEvents = [
+      {
+        ...first,
+        event_location: first.event_location ?? b.eventLocation ?? null,
+        guest_count: first.guest_count ?? b.guestCount ?? null,
+        event_at: first.event_at ?? bookingAtIso,
+        function_type: first.function_type ?? b.functionType ?? null,
+      },
+      ...serializedEvents.slice(1),
+    ];
+  }
+
   const firstEvent = hasEvents ? serializedEvents[0] : null;
+  const rootAt = firstEvent?.event_at ?? bookingAtIso;
+  const rootLoc = firstEvent?.event_location ?? b.eventLocation ?? null;
+  const rootGuests = firstEvent?.guest_count ?? b.guestCount ?? null;
+  const rootFn = firstEvent?.function_type ?? b.functionType ?? null;
 
   return {
     id: b.id,
@@ -202,16 +259,11 @@ function serializeBooking(b, { includePayments = true } = {}) {
     customer_email: b.customerEmail,
     event_range_start: b.eventRangeStart?.toISOString?.() ?? b.eventRangeStart,
     event_range_end: b.eventRangeEnd?.toISOString?.() ?? b.eventRangeEnd,
-    // Keep event details inside `events` once event rows exist.
-    ...(hasEvents
-      ? {}
-      : {
-          event_at: b.eventAt?.toISOString?.() ?? b.eventAt,
-          event_location: b.eventLocation,
-          function_type: b.functionType,
-          guest_count: b.guestCount,
-          notes: b.notes,
-        }),
+    event_at: rootAt,
+    event_location: rootLoc,
+    function_type: rootFn,
+    guest_count: rootGuests,
+    ...(!hasEvents ? { notes: b.notes } : {}),
     discount_amount: num(b.discountAmount),
     service_charge_pct: num(b.serviceChargePct),
     tax_pct: num(b.taxPct),
@@ -219,15 +271,43 @@ function serializeBooking(b, { includePayments = true } = {}) {
     service_charge_amount: num(b.serviceChargeAmount),
     tax_amount: num(b.taxAmount),
     total_due: num(b.totalDue),
+    /** Mirrors `total_due` for clients that resolve totals from `final_amount`. */
+    final_amount: num(b.totalDue),
     amount_paid: num(b.amountPaid),
     payment_status: b.paymentStatus,
     menu_items: menuItems,
     events: serializedEvents,
     ...(payments !== undefined ? { payments } : {}),
-    can_edit_menu: canEditMenuBeforeEvent(firstEvent?.event_at ?? b.eventAt),
+    can_edit_menu: canEditMenuBeforeEvent(firstEvent?.event_at ?? bookingAtIso),
     created_at: b.createdAt?.toISOString?.() ?? b.createdAt,
     updated_at: b.updatedAt?.toISOString?.() ?? b.updatedAt,
+    completed_at: b.completedAt?.toISOString?.() ?? b.completedAt ?? null,
   };
+}
+
+function bookingEventTimestampsFromRow(b) {
+  const events = [...(b.events || [])].sort((a, c) => {
+    const ta = a.eventAt ? new Date(a.eventAt).getTime() : 0;
+    const tb = c.eventAt ? new Date(c.eventAt).getTime() : 0;
+    return ta - tb;
+  });
+  const ts = [];
+  for (const ev of events) {
+    if (ev.eventAt) {
+      const t = new Date(ev.eventAt).getTime();
+      if (!Number.isNaN(t)) ts.push(t);
+    }
+  }
+  if (ts.length === 0 && b.eventAt) {
+    const t = new Date(b.eventAt).getTime();
+    if (!Number.isNaN(t)) ts.push(t);
+  }
+  return ts.sort((a, c) => a - c);
+}
+
+function bookingLatestEventMsFromRow(b) {
+  const ts = bookingEventTimestampsFromRow(b);
+  return ts.length ? ts[ts.length - 1] : NaN;
 }
 
 async function loadBookingForBusiness(bookingId, businessId, extras = {}) {
@@ -876,6 +956,9 @@ async function listBookings(req, res) {
       event_to,
       created_from,
       created_to,
+      completed_from,
+      completed_to,
+      manual_completed_only,
       limit,
       offset,
     } = req.query;
@@ -897,14 +980,26 @@ async function listBookings(req, res) {
       if (created_from) where.createdAt.gte = new Date(created_from);
       if (created_to) where.createdAt.lte = new Date(created_to);
     }
+    if (completed_from || completed_to) {
+      where.completedAt = {};
+      if (completed_from) where.completedAt.gte = new Date(completed_from);
+      if (completed_to) where.completedAt.lte = new Date(completed_to);
+    } else if (manual_completed_only === "true") {
+      where.completedAt = { not: null };
+    }
 
     const take = Math.min(200, parseInt(limit, 10) || 50);
     const skip = parseInt(offset, 10) || 0;
 
+    const useCompletionSort =
+      manual_completed_only === "true" || completed_from || completed_to;
+
     const [rows, total] = await Promise.all([
       prisma.booking.findMany({
         where,
-        orderBy: { createdAt: "desc" },
+        orderBy: useCompletionSort
+          ? [{ completedAt: "desc" }, { createdAt: "desc" }]
+          : { createdAt: "desc" },
         take,
         skip,
         include: {
@@ -949,6 +1044,67 @@ async function getBooking(req, res) {
     return successResponse(res, "OK", serializeBooking(enrichedRow));
   } catch (e) {
     console.error("getBooking:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
+ * POST /v1/bookings/:id/completeOrder — caterer marks booking completed (order history / dashboard).
+ */
+async function completeBookingOrder(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+
+    const row = await loadBookingForBusiness(bookingId, businessId, {
+      includePayments: true,
+    });
+    if (!row) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    if (row.completedAt) {
+      const enriched = await enrichEventSnapshotMenuImages(row);
+      return successResponse(res, "Already completed", serializeBooking(enriched));
+    }
+    if (row.status !== "CONFIRMED") {
+      return errorResponse(
+        res,
+        "Only confirmed bookings can be marked complete",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+    const latestMs = bookingLatestEventMsFromRow(row);
+    if (Number.isNaN(latestMs)) {
+      return errorResponse(
+        res,
+        "Add at least one scheduled event before completing this order",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (latestMs >= Date.now()) {
+      return errorResponse(
+        res,
+        "You can complete this order only after the last event has finished",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const updated = await prisma.booking.update({
+      where: { id: bookingId },
+      data: { completedAt: new Date() },
+      include: {
+        menuItems: true,
+        events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+        payments: { orderBy: { createdAt: "desc" } },
+      },
+    });
+    const enriched = await enrichEventSnapshotMenuImages(updated);
+    return successResponse(res, "Order completed", serializeBooking(enriched));
+  } catch (e) {
+    console.error("completeBookingOrder:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
 }
@@ -1088,6 +1244,9 @@ async function recordPayment(req, res) {
 
     const existing = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
+      include: {
+        events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+      },
     });
     if (!existing) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
@@ -1096,7 +1255,7 @@ async function recordPayment(req, res) {
       return errorResponse(res, "Payments only for confirmed bookings", 200, "VALIDATION_ERROR");
     }
 
-    const totalDue = num(existing.totalDue);
+    const totalDue = resolveTotalDueForPayment(existing);
     const already = num(existing.amountPaid);
     const remaining = Math.max(0, totalDue - already);
     if (amount > remaining + 0.01) {
@@ -1195,6 +1354,7 @@ module.exports = {
   deleteEvent,
   listBookings,
   getBooking,
+  completeBookingOrder,
   deleteBooking,
   confirmBooking,
   recordPayment,
