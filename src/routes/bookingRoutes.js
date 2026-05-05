@@ -8,6 +8,7 @@ const {
   createEvent,
   updateEvent,
   deleteEvent,
+  getDashboard,
   listBookings,
   getBooking,
   completeBookingOrder,
@@ -40,6 +41,14 @@ router.delete(
   authMiddleware,
   businessContextMiddleware,
   deleteBooking,
+);
+
+// Dashboard aggregates (mobile home)
+router.get(
+  "/v1/dashboard",
+  authMiddleware,
+  businessContextMiddleware,
+  getDashboard,
 );
 
 // List Bookings
