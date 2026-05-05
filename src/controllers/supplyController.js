@@ -903,6 +903,161 @@ async function shareEventSupplyItems(req, res) {
   return successResponse(res, "Share request queued", { ok: true });
 }
 
+function normalizeVendorPhone(raw) {
+  const digits = String(raw ?? "").replace(/[^\d]/g, "");
+  if (digits.length === 10) return `91${digits}`;
+  return digits;
+}
+
+function serializeVendor(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    address: row.address ?? "",
+    phone: row.phone,
+    category: row.category,
+    is_active: row.isActive,
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+  };
+}
+
+async function createVendor(req, res) {
+  try {
+    const businessId = req.businessId;
+    const body = req.body || {};
+    const name = String(body.name ?? "").trim();
+    const phone = normalizeVendorPhone(body.phone ?? body.whatsapp_number);
+    const category = String(body.category ?? "").trim().toLowerCase();
+    const address = String(body.address ?? "").trim();
+    if (!name) {
+      return errorResponse(res, "Vendor name is required", 200, "VALIDATION_ERROR");
+    }
+    if (!phone || phone.length < 10) {
+      return errorResponse(res, "Vendor phone is required", 200, "VALIDATION_ERROR");
+    }
+    if (!category) {
+      return errorResponse(
+        res,
+        "Vendor category is required",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+    const row = await prisma.vendor.create({
+      data: {
+        businessId,
+        name,
+        phone,
+        category,
+        address: address || null,
+      },
+    });
+    return successResponse(res, "Vendor created", serializeVendor(row));
+  } catch (e) {
+    console.error("createVendor:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+async function listVendors(req, res) {
+  try {
+    const businessId = req.businessId;
+    const category = String(req.query.category ?? "")
+      .trim()
+      .toLowerCase();
+    const q = String(req.query.q ?? "")
+      .trim()
+      .toLowerCase();
+    const rows = await prisma.vendor.findMany({
+      where: {
+        businessId,
+        isActive: true,
+        ...(category ? { category } : {}),
+      },
+      orderBy: [{ name: "asc" }, { createdAt: "desc" }],
+    });
+    const filtered = q
+      ? rows.filter((row) => {
+          const hay = `${row.name} ${row.phone} ${row.address ?? ""}`.toLowerCase();
+          return hay.includes(q);
+        })
+      : rows;
+    return successResponse(res, "OK", { vendors: filtered.map(serializeVendor) });
+  } catch (e) {
+    console.error("listVendors:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+async function updateVendor(req, res) {
+  try {
+    const businessId = req.businessId;
+    const id = req.params.id;
+    const body = req.body || {};
+    const existing = await prisma.vendor.findFirst({
+      where: { id, businessId, isActive: true },
+      select: { id: true },
+    });
+    if (!existing) return errorResponse(res, "Vendor not found", 404, "NOT_FOUND");
+    const data = {};
+    if (body.name !== undefined) {
+      const name = String(body.name ?? "").trim();
+      if (!name) {
+        return errorResponse(res, "Vendor name is required", 200, "VALIDATION_ERROR");
+      }
+      data.name = name;
+    }
+    if (body.phone !== undefined || body.whatsapp_number !== undefined) {
+      const phone = normalizeVendorPhone(body.phone ?? body.whatsapp_number);
+      if (!phone || phone.length < 10) {
+        return errorResponse(res, "Vendor phone is required", 200, "VALIDATION_ERROR");
+      }
+      data.phone = phone;
+    }
+    if (body.category !== undefined) {
+      const category = String(body.category ?? "")
+        .trim()
+        .toLowerCase();
+      if (!category) {
+        return errorResponse(
+          res,
+          "Vendor category is required",
+          200,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.category = category;
+    }
+    if (body.address !== undefined) {
+      const address = String(body.address ?? "").trim();
+      data.address = address || null;
+    }
+    const row = await prisma.vendor.update({ where: { id }, data });
+    return successResponse(res, "Vendor updated", serializeVendor(row));
+  } catch (e) {
+    console.error("updateVendor:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+async function deleteVendor(req, res) {
+  try {
+    const businessId = req.businessId;
+    const id = req.params.id;
+    const existing = await prisma.vendor.findFirst({
+      where: { id, businessId, isActive: true },
+      select: { id: true },
+    });
+    if (!existing) return errorResponse(res, "Vendor not found", 404, "NOT_FOUND");
+    await prisma.vendor.update({ where: { id }, data: { isActive: false } });
+    return successResponse(res, "Vendor deleted", { id });
+  } catch (e) {
+    console.error("deleteVendor:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 /**
  * POST /v1/generateSupplyListPdf
  * Body: { document_label, heading, subtitle?, company_name?, table_labels: { item, qty, unit }, groups: [{ title, lines: [{ name, quantity, unit }] }] }
@@ -957,6 +1112,10 @@ module.exports = {
   setEventSupplyItems,
   getEventSupplyItems,
   getSuggestedEventSupplyFromMenu,
+  createVendor,
+  listVendors,
+  updateVendor,
+  deleteVendor,
   updateEventSupplyItem,
   deleteEventSupplyItem,
   shareBookingSupplyItems,
