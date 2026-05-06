@@ -13,6 +13,10 @@ const {
   setEventSupplyItems,
   getEventSupplyItems,
   getSuggestedEventSupplyFromMenu,
+  createVendor,
+  listVendors,
+  updateVendor,
+  deleteVendor,
   updateEventSupplyItem,
   deleteEventSupplyItem,
   shareBookingSupplyItems,
@@ -144,6 +148,31 @@ router.patch(
   authMiddleware,
   businessContextMiddleware,
   updateSupplySavedList,
+);
+
+router.post(
+  "/v1/vendors",
+  authMiddleware,
+  businessContextMiddleware,
+  createVendor,
+);
+router.get(
+  "/v1/vendors",
+  authMiddleware,
+  businessContextMiddleware,
+  listVendors,
+);
+router.patch(
+  "/v1/vendors/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  updateVendor,
+);
+router.delete(
+  "/v1/vendors/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  deleteVendor,
 );
 
 module.exports = router;
