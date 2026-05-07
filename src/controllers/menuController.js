@@ -92,12 +92,14 @@ async function validateIngredientSupplyRefs(ingredients, businessId, userId) {
 
 function hasValidIngredients(raw) {
   const arr = normalizeIngredients(raw);
-  if (!arr.length) return false;
+  if (!arr.length) return true;
   return arr.every((r) => {
     const name = String(r?.name ?? "").trim();
-    const unit = String(r?.unit ?? "").trim();
-    const qty = Number(String(r?.qty ?? "").trim());
-    return !!name && !!unit && Number.isFinite(qty) && qty > 0;
+    if (!name) return false;
+    const qtyRaw = String(r?.qty ?? "").trim();
+    if (!qtyRaw) return true;
+    const qty = Number(qtyRaw);
+    return Number.isFinite(qty) && qty > 0;
   });
 }
 
@@ -302,7 +304,7 @@ exports.createMenuItem = async (req, res) => {
         "Missing or invalid request fields",
         422,
         "VALIDATION_ERROR",
-        "ingredients are required and each row must have name, qty (>0), and unit.",
+        "Each ingredient row must include name. qty is optional, but if provided it must be greater than 0.",
       );
     }
     const ingSupplyErr = await validateIngredientSupplyRefs(
@@ -769,7 +771,7 @@ exports.updateMenuItem = async (req, res) => {
           "Missing or invalid request fields",
           422,
           "VALIDATION_ERROR",
-          "ingredients are required and each row must have name, qty (>0), and unit.",
+          "Each ingredient row must include name. qty is optional, but if provided it must be greater than 0.",
         );
       }
       const ingSupplyErr = await validateIngredientSupplyRefs(
