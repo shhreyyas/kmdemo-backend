@@ -10,42 +10,8 @@ BEGIN
   END IF;
 END$$;
 
--- Backward-compatible fix: some DBs have `categorySlug` but no `category`
-ALTER TABLE "SupplyItem"
-  ADD COLUMN IF NOT EXISTS "category" TEXT;
-
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_name = 'SupplyItem' AND column_name = 'categorySlug'
-  ) THEN
-    EXECUTE '
-      UPDATE "SupplyItem"
-      SET "category" = CASE lower(COALESCE("categorySlug", ''''))
-        WHEN ''vegetables'' THEN ''VEGETABLES''
-        WHEN ''dairy'' THEN ''DAIRY''
-        WHEN ''groceries'' THEN ''GROCERIES''
-        WHEN ''utensils'' THEN ''UTENSILS''
-        ELSE ''GROCERIES''
-      END
-      WHERE "category" IS NULL
-    ';
-  ELSE
-    EXECUTE '
-      UPDATE "SupplyItem"
-      SET "category" = ''GROCERIES''
-      WHERE "category" IS NULL
-    ';
-  END IF;
-END$$;
-
-ALTER TABLE "SupplyItem"
-  ALTER COLUMN "category" SET NOT NULL;
-
-CREATE INDEX IF NOT EXISTS "SupplyItem_businessId_type_category_idx"
-  ON "SupplyItem"("businessId", "type", "category");
+CREATE INDEX IF NOT EXISTS "SupplyItem_businessId_type_categorySlug_idx"
+  ON "SupplyItem"("businessId", "type", "categorySlug");
 
 -- CreateTable
 CREATE TABLE IF NOT EXISTS "SupplySavedList" (
@@ -54,7 +20,6 @@ CREATE TABLE IF NOT EXISTS "SupplySavedList" (
     "bookingEventId" TEXT,
     "title" TEXT NOT NULL,
     "categoriesLabel" TEXT,
-    "isActive" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -68,7 +33,7 @@ CREATE TABLE IF NOT EXISTS "SupplySavedListItem" (
     "supplyItemId" TEXT NOT NULL,
     "quantity" DECIMAL(12,3) NOT NULL DEFAULT 0,
     "unit" TEXT NOT NULL,
-    "category" TEXT NOT NULL,
+    "categorySlug" TEXT NOT NULL,
     "nameSnapshot" JSONB NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -77,16 +42,16 @@ CREATE TABLE IF NOT EXISTS "SupplySavedListItem" (
 );
 
 -- CreateIndex
-CREATE INDEX IF NOT EXISTS "SupplySavedList_businessId_isActive_createdAt_idx"
-  ON "SupplySavedList"("businessId", "isActive", "createdAt");
+CREATE INDEX IF NOT EXISTS "SupplySavedList_businessId_createdAt_idx"
+  ON "SupplySavedList"("businessId", "createdAt");
 
 -- CreateIndex
 CREATE INDEX IF NOT EXISTS "SupplySavedList_bookingEventId_idx"
   ON "SupplySavedList"("bookingEventId");
 
 -- CreateIndex
-CREATE INDEX IF NOT EXISTS "SupplySavedListItem_listId_category_idx"
-  ON "SupplySavedListItem"("listId", "category");
+CREATE INDEX IF NOT EXISTS "SupplySavedListItem_listId_categorySlug_idx"
+  ON "SupplySavedListItem"("listId", "categorySlug");
 
 -- AddForeignKey
 DO $$

@@ -3,17 +3,21 @@ CREATE TABLE IF NOT EXISTS "Vendor" (
     "businessId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "address" TEXT,
-    "phone" TEXT NOT NULL,
-    "category" TEXT NOT NULL,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "whatsappNo" TEXT,
+    "categorySlug" TEXT,
 
     CONSTRAINT "Vendor_pkey" PRIMARY KEY ("id")
 );
 
-CREATE INDEX IF NOT EXISTS "Vendor_businessId_category_isActive_idx"
-  ON "Vendor"("businessId", "category", "isActive");
+-- Backward-compatible fix for divergent vendor schemas.
+ALTER TABLE "Vendor"
+  ADD COLUMN IF NOT EXISTS "whatsappNo" TEXT;
+
+ALTER TABLE "Vendor"
+  ADD COLUMN IF NOT EXISTS "categorySlug" TEXT;
 
 CREATE INDEX IF NOT EXISTS "Vendor_businessId_isActive_idx"
   ON "Vendor"("businessId", "isActive");

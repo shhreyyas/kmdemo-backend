@@ -914,8 +914,8 @@ function serializeVendor(row) {
     id: row.id,
     name: row.name,
     address: row.address ?? "",
-    phone: row.phone,
-    category: row.category,
+    whatsappNo: row.whatsappNo ?? "",
+    categorySlug: row.categorySlug ?? "",
     is_active: row.isActive,
     created_at: row.createdAt,
     updated_at: row.updatedAt,
@@ -927,16 +927,20 @@ async function createVendor(req, res) {
     const businessId = req.businessId;
     const body = req.body || {};
     const name = String(body.name ?? "").trim();
-    const phone = normalizeVendorPhone(body.phone ?? body.whatsapp_number);
-    const category = String(body.category ?? "").trim().toLowerCase();
+    const whatsappNo = normalizeVendorPhone(
+      body.whatsappNo ?? body.whatsapp_number ?? body.phone,
+    );
+    const categorySlug = String(body.categorySlug ?? body.category ?? "")
+      .trim()
+      .toLowerCase();
     const address = String(body.address ?? "").trim();
     if (!name) {
       return errorResponse(res, "Vendor name is required", 200, "VALIDATION_ERROR");
     }
-    if (!phone || phone.length < 10) {
+    if (!whatsappNo || whatsappNo.length < 10) {
       return errorResponse(res, "Vendor phone is required", 200, "VALIDATION_ERROR");
     }
-    if (!category) {
+    if (!categorySlug) {
       return errorResponse(
         res,
         "Vendor category is required",
@@ -948,8 +952,8 @@ async function createVendor(req, res) {
       data: {
         businessId,
         name,
-        phone,
-        category,
+        whatsappNo,
+        categorySlug,
         address: address || null,
       },
     });
@@ -963,7 +967,7 @@ async function createVendor(req, res) {
 async function listVendors(req, res) {
   try {
     const businessId = req.businessId;
-    const category = String(req.query.category ?? "")
+    const categorySlug = String(req.query.categorySlug ?? req.query.category ?? "")
       .trim()
       .toLowerCase();
     const q = String(req.query.q ?? "")
@@ -973,13 +977,13 @@ async function listVendors(req, res) {
       where: {
         businessId,
         isActive: true,
-        ...(category ? { category } : {}),
+        ...(categorySlug ? { categorySlug } : {}),
       },
       orderBy: [{ name: "asc" }, { createdAt: "desc" }],
     });
     const filtered = q
       ? rows.filter((row) => {
-          const hay = `${row.name} ${row.phone} ${row.address ?? ""}`.toLowerCase();
+          const hay = `${row.name} ${row.whatsappNo ?? ""} ${row.address ?? ""}`.toLowerCase();
           return hay.includes(q);
         })
       : rows;
@@ -1008,18 +1012,24 @@ async function updateVendor(req, res) {
       }
       data.name = name;
     }
-    if (body.phone !== undefined || body.whatsapp_number !== undefined) {
-      const phone = normalizeVendorPhone(body.phone ?? body.whatsapp_number);
-      if (!phone || phone.length < 10) {
+    if (
+      body.whatsappNo !== undefined ||
+      body.whatsapp_number !== undefined ||
+      body.phone !== undefined
+    ) {
+      const whatsappNo = normalizeVendorPhone(
+        body.whatsappNo ?? body.whatsapp_number ?? body.phone,
+      );
+      if (!whatsappNo || whatsappNo.length < 10) {
         return errorResponse(res, "Vendor phone is required", 200, "VALIDATION_ERROR");
       }
-      data.phone = phone;
+      data.whatsappNo = whatsappNo;
     }
-    if (body.category !== undefined) {
-      const category = String(body.category ?? "")
+    if (body.categorySlug !== undefined || body.category !== undefined) {
+      const categorySlug = String(body.categorySlug ?? body.category ?? "")
         .trim()
         .toLowerCase();
-      if (!category) {
+      if (!categorySlug) {
         return errorResponse(
           res,
           "Vendor category is required",
@@ -1027,7 +1037,7 @@ async function updateVendor(req, res) {
           "VALIDATION_ERROR",
         );
       }
-      data.category = category;
+      data.categorySlug = categorySlug;
     }
     if (body.address !== undefined) {
       const address = String(body.address ?? "").trim();
