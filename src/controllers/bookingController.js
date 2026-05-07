@@ -310,6 +310,20 @@ function bookingLatestEventMsFromRow(b) {
   return ts.length ? ts[ts.length - 1] : NaN;
 }
 
+/**
+ * Past-day confirmed booking that is still waiting manual completion.
+ * Mirrors app-side rule used by dashboard/schedule.
+ */
+function bookingNeedsPastDayManualCompleteFromRow(b, now = new Date()) {
+  if (!b || b.status !== "CONFIRMED") return false;
+  if (b.completedAt) return false;
+  const latest = bookingLatestEventMsFromRow(b);
+  if (Number.isNaN(latest)) return false;
+  const startToday = new Date(now);
+  startToday.setHours(0, 0, 0, 0);
+  return latest < startToday.getTime();
+}
+
 async function loadBookingForBusiness(bookingId, businessId, extras = {}) {
   return prisma.booking.findFirst({
     where: { id: bookingId, businessId },
@@ -1000,6 +1014,7 @@ async function getDashboard(req, res) {
     const twoDayRaw = [];
     const upcomingRaw = [];
     const completedRaw = [];
+    const pendingManualCompletionRaw = [];
 
     for (const b of confirmedRows) {
       const t = deriveBookingEventMs(b);
@@ -1013,14 +1028,18 @@ async function getDashboard(req, res) {
       if (t >= endToday.getTime()) {
         upcomingRaw.push({ b, t });
       }
-      if (t < startToday.getTime()) {
+      if (b.completedAt) {
         completedRaw.push({ b, t });
+      }
+      if (bookingNeedsPastDayManualCompleteFromRow(b, now)) {
+        pendingManualCompletionRaw.push({ b, t });
       }
     }
 
     todayRaw.sort((a, b) => a.t - b.t);
     upcomingRaw.sort((a, b) => a.t - b.t);
     completedRaw.sort((a, b) => b.t - a.t);
+    pendingManualCompletionRaw.sort((a, b) => a.t - b.t);
 
     const ordersToPrepare = twoDayRaw.filter(({ t }) => t >= now.getTime()).length;
 
@@ -1033,6 +1052,9 @@ async function getDashboard(req, res) {
       today_timeline: todayRaw.map(({ b }) => serializeBooking(b)),
       upcoming_bookings: upcomingRaw.slice(0, 5).map(({ b }) => serializeBooking(b)),
       completed_orders: completedRaw.slice(0, 5).map(({ b }) => serializeBooking(b)),
+      pending_manual_completion: pendingManualCompletionRaw
+        .slice(0, 10)
+        .map(({ b }) => serializeBooking(b)),
     };
 
     return successResponse(res, "OK", payload);
