@@ -77,6 +77,16 @@ function serializeSupplyItemCategory(row, lang) {
   };
 }
 
+function serializeSupplyUnit(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+  };
+}
+
 /**
  * GET query.type optional: INGREDIENT | UTENSIL — only categories that have
  * at least one visible supply item of that type (for tab UX).
@@ -155,6 +165,28 @@ async function createSupplyItem(req, res) {
         "VALIDATION_ERROR",
       );
     }
+    const unitOptions = Array.isArray(body.unit_options)
+      ? body.unit_options
+          .map((u) => String(u ?? "").trim().toLowerCase())
+          .filter(Boolean)
+      : [];
+    const defaultUnit = String(body.default_unit || "").trim().toLowerCase();
+    if (unitOptions.length === 0) {
+      return errorResponse(
+        res,
+        "unit_options must have at least one unit",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (!defaultUnit || !unitOptions.includes(defaultUnit)) {
+      return errorResponse(
+        res,
+        "default_unit must be one of unit_options",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
     const categoryRow = await loadSupplyCategoryBySlug(categorySlug);
     if (!categoryRow) {
       return errorResponse(
@@ -173,8 +205,8 @@ async function createSupplyItem(req, res) {
         type,
         categorySlug: categoryRow.slug,
         name: names,
-        unitOptions: Array.isArray(body.unit_options) ? body.unit_options : [],
-        defaultUnit: String(body.default_unit || "pcs"),
+        unitOptions,
+        defaultUnit,
         availableCount:
           body.available_count == null
             ? null
@@ -300,22 +332,65 @@ async function updateSupplyItem(req, res) {
         "VALIDATION_ERROR",
       );
     }
+    const patch = {
+      ...(names ? { name: names } : {}),
+      ...(body.default_unit !== undefined
+        ? { defaultUnit: String(body.default_unit || "").trim().toLowerCase() }
+        : {}),
+      ...(body.available_count !== undefined
+        ? {
+            availableCount:
+              body.available_count == null
+                ? null
+                : Math.max(0, Number(body.available_count) || 0),
+          }
+        : {}),
+      ...(body.photo_url !== undefined ? { photoUrl: body.photo_url } : {}),
+    };
+    if (Array.isArray(body.unit_options)) {
+      patch.unitOptions = body.unit_options
+        .map((u) => String(u ?? "").trim().toLowerCase())
+        .filter(Boolean);
+    }
+    if (body.category_slug !== undefined || body.category !== undefined) {
+      const categorySlug = String(body.category_slug ?? body.category ?? "")
+        .trim()
+        .toLowerCase();
+      if (!categorySlug) {
+        return errorResponse(res, "category_slug is required", 200, "VALIDATION_ERROR");
+      }
+      const categoryRow = await loadSupplyCategoryBySlug(categorySlug);
+      if (!categoryRow) {
+        return errorResponse(
+          res,
+          "category_slug must match an active supply category slug",
+          200,
+          "VALIDATION_ERROR",
+        );
+      }
+      patch.categorySlug = categoryRow.slug;
+    }
+    if (patch.unitOptions && patch.unitOptions.length === 0) {
+      return errorResponse(
+        res,
+        "unit_options must have at least one unit",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+    const finalUnitOptions = patch.unitOptions ?? existing.unitOptions ?? [];
+    const finalDefaultUnit = patch.defaultUnit ?? existing.defaultUnit;
+    if (!finalDefaultUnit || !finalUnitOptions.includes(finalDefaultUnit)) {
+      return errorResponse(
+        res,
+        "default_unit must be one of unit_options",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
     const row = await prisma.supplyItem.update({
       where: { id },
-      data: {
-        ...(names ? { name: names } : {}),
-        ...(Array.isArray(body.unit_options) ? { unitOptions: body.unit_options } : {}),
-        ...(body.default_unit ? { defaultUnit: String(body.default_unit) } : {}),
-        ...(body.available_count !== undefined
-          ? {
-              availableCount:
-                body.available_count == null
-                  ? null
-                  : Math.max(0, Number(body.available_count) || 0),
-            }
-          : {}),
-        ...(body.photo_url !== undefined ? { photoUrl: body.photo_url } : {}),
-      },
+      data: patch,
       include: { category: true },
     });
     return successResponse(
@@ -342,6 +417,88 @@ async function deleteSupplyItem(req, res) {
     return successResponse(res, "Supply item deleted", { id });
   } catch (e) {
     console.error("deleteSupplyItem:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+async function listSupplyUnits(req, res) {
+  try {
+    const rows = await prisma.unit.findMany({
+      orderBy: [{ name: "asc" }, { createdAt: "desc" }],
+    });
+    return successResponse(res, "OK", {
+      units: rows.map(serializeSupplyUnit),
+    });
+  } catch (e) {
+    console.error("listSupplyUnits:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+async function createSupplyUnit(req, res) {
+  try {
+    const body = req.body || {};
+    const name = String(body.name ?? "").trim();
+    const slug = String(body.slug ?? "")
+      .trim()
+      .toLowerCase();
+    if (!name) return errorResponse(res, "Unit name is required", 200, "VALIDATION_ERROR");
+    if (!slug) return errorResponse(res, "Unit slug is required", 200, "VALIDATION_ERROR");
+    const existing = await prisma.unit.findUnique({ where: { slug } });
+    if (existing) return errorResponse(res, "Unit slug already exists", 200, "VALIDATION_ERROR");
+    const row = await prisma.unit.create({
+      data: { name, slug },
+    });
+    return successResponse(res, "Supply unit created", serializeSupplyUnit(row));
+  } catch (e) {
+    console.error("createSupplyUnit:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+async function updateSupplyUnit(req, res) {
+  try {
+    const id = req.params.id;
+    const body = req.body || {};
+    const existing = await prisma.unit.findUnique({ where: { id } });
+    if (!existing) return errorResponse(res, "Supply unit not found", 404, "NOT_FOUND");
+    const patch = {};
+    if (body.name !== undefined) {
+      const name = String(body.name ?? "").trim();
+      if (!name) return errorResponse(res, "Unit name is required", 200, "VALIDATION_ERROR");
+      patch.name = name;
+    }
+    if (body.slug !== undefined) {
+      const slug = String(body.slug ?? "")
+        .trim()
+        .toLowerCase();
+      if (!slug) return errorResponse(res, "Unit slug is required", 200, "VALIDATION_ERROR");
+      const conflict = await prisma.unit.findFirst({
+        where: { slug, id: { not: id } },
+        select: { id: true },
+      });
+      if (conflict) {
+        return errorResponse(res, "Unit slug already exists", 200, "VALIDATION_ERROR");
+      }
+      patch.slug = slug;
+    }
+    const row = await prisma.unit.update({ where: { id }, data: patch });
+    return successResponse(res, "Supply unit updated", serializeSupplyUnit(row));
+  } catch (e) {
+    console.error("updateSupplyUnit:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+async function deleteSupplyUnit(req, res) {
+  try {
+    const id = req.params.id;
+    const existing = await prisma.unit.findUnique({ where: { id } });
+    if (!existing) return errorResponse(res, "Supply unit not found", 404, "NOT_FOUND");
+    await prisma.unit.delete({ where: { id } });
+    return successResponse(res, "Supply unit deleted", { id });
+  } catch (e) {
+    console.error("deleteSupplyUnit:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
 }
@@ -1115,6 +1272,10 @@ module.exports = {
   createSupplyItem,
   listSupplyItems,
   listSupplyItemCategories,
+  listSupplyUnits,
+  createSupplyUnit,
+  updateSupplyUnit,
+  deleteSupplyUnit,
   updateSupplyItem,
   deleteSupplyItem,
   setBookingSupplyItems,
