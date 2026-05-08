@@ -445,6 +445,17 @@ model SupplyItemCategory {
   @@index([isActive, sortOrder])
 }
 
+/// Admin-managed Units catalog used globally across modules.
+model Unit {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("Units")
+}
+
 model Dish {
   id            String   @id @default(uuid())
   businessId    String

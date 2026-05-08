@@ -48,6 +48,50 @@ function normalizeIngredients(raw) {
   return raw;
 }
 
+async function enrichIngredientsWithSupplyUnits(rawIngredients) {
+  const ingredients = normalizeIngredients(rawIngredients);
+  const ids = [
+    ...new Set(
+      ingredients
+        .map((r) => {
+          const sid = r?.supply_item_id ?? r?.supplyItemId;
+          return typeof sid === "string" ? sid.trim() : "";
+        })
+        .filter(Boolean),
+    ),
+  ];
+  if (ids.length === 0) return ingredients;
+
+  const rows = await prisma.supplyItem.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      unitOptions: true,
+      defaultUnit: true,
+    },
+  });
+  const byId = new Map(rows.map((r) => [r.id, r]));
+
+  return ingredients.map((row) => {
+    const sid = row?.supply_item_id ?? row?.supplyItemId;
+    const id = typeof sid === "string" ? sid.trim() : "";
+    if (!id) return row;
+    const source = byId.get(id);
+    if (!source) return row;
+    const unitOptions = Array.isArray(source.unitOptions) ? source.unitOptions : [];
+    return {
+      ...row,
+      unit_options: unitOptions,
+      default_unit: source.defaultUnit ?? null,
+      supply_item: {
+        id: source.id,
+        unit_options: unitOptions,
+        default_unit: source.defaultUnit ?? null,
+      },
+    };
+  });
+}
+
 /** Same visibility branches as `supplyController.listSupplyItems`. */
 function supplyVisibilityOrBranchesForIngredients(businessId, userId) {
   return [
@@ -572,8 +616,15 @@ exports.listMenuItems = async (req, res) => {
       include: { category: true },
     });
 
-    const data = rows.map((row) =>
-      formatMenuItem(row, { includeFinancials: true, language: requestedLanguage }),
+    const data = await Promise.all(
+      rows.map(async (row) => {
+        const item = formatMenuItem(row, {
+          includeFinancials: true,
+          language: requestedLanguage,
+        });
+        item.ingredients = await enrichIngredientsWithSupplyUnits(item.ingredients);
+        return item;
+      }),
     );
 
     return successResponse(res, "Menu items fetched successfully", data, 200, {
@@ -624,10 +675,16 @@ exports.getMenuItem = async (req, res) => {
       );
     }
 
+    const payload = formatMenuItem(menu, {
+      includeFinancials: true,
+      language: requestedLanguage,
+    });
+    payload.ingredients = await enrichIngredientsWithSupplyUnits(payload.ingredients);
+
     return successResponse(
       res,
       "Menu item fetched successfully",
-      formatMenuItem(menu, { includeFinancials: true, language: requestedLanguage }),
+      payload,
       200,
     );
   } catch (error) {

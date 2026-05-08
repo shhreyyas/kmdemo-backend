@@ -6,6 +6,10 @@ const {
   createSupplyItem,
   listSupplyItems,
   listSupplyItemCategories,
+  listSupplyUnits,
+  createSupplyUnit,
+  updateSupplyUnit,
+  deleteSupplyUnit,
   updateSupplyItem,
   deleteSupplyItem,
   setBookingSupplyItems,
@@ -47,6 +51,30 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   listSupplyItemCategories,
+);
+router.get(
+  "/v1/supplyUnits",
+  authMiddleware,
+  businessContextMiddleware,
+  listSupplyUnits,
+);
+router.post(
+  "/v1/supplyUnits",
+  authMiddleware,
+  businessContextMiddleware,
+  createSupplyUnit,
+);
+router.patch(
+  "/v1/supplyUnits/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  updateSupplyUnit,
+);
+router.delete(
+  "/v1/supplyUnits/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  deleteSupplyUnit,
 );
 router.put(
   "/v1/updateSupplyItem/:id",
