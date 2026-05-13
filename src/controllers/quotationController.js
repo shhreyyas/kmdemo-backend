@@ -28,6 +28,16 @@ function num(d) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** @returns {number | null | undefined} undefined = omit patch; null = clear column */
+function parsePlatePrice(body) {
+  const raw = body.plate_price ?? body.platePrice;
+  if (raw === undefined) return undefined;
+  if (raw === null || raw === "") return null;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
 /** @param {unknown} bodyStatus @param {"DRAFT"|"SENT"|"ACCEPTED"} [fallback] */
 function parseQuotationStatus(bodyStatus, fallback = "SENT") {
   const raw = String(bodyStatus ?? fallback).toUpperCase();
@@ -47,6 +57,47 @@ function computeQuotationPricing(rows, guestCount, discount, servicePct, taxPct)
   return { subtotal, serviceChargeAmount, taxAmount, total };
 }
 
+/**
+ * Build quotation menu snapshot rows from optional `body.menu_items`, else catalog prices.
+ * @returns {{ rows: { menuItemId: string, pricePerPlateSnapshot: number, nameSnapshot: string }[] } | { error: string }}
+ */
+function buildSnapRowsFromMenuItemsOrCatalog(body, menus, requestedLanguage) {
+  const custom = Array.isArray(body.menu_items) ? body.menu_items : [];
+  if (custom.length === 0) {
+    return {
+      rows: menus.map((m) => ({
+        menuItemId: m.id,
+        pricePerPlateSnapshot: num(m.pricePerPerson),
+        nameSnapshot: resolveLocalizedName(m.name, requestedLanguage),
+      })),
+    };
+  }
+  if (custom.length !== menus.length) {
+    return { error: "menu_items must have the same length as menu_item_ids" };
+  }
+  const byId = new Map(custom.map((x) => [String(x.menu_item_id), x]));
+  for (const m of menus) {
+    if (!byId.has(m.id)) {
+      return { error: "menu_items must include every menu_item_id" };
+    }
+  }
+  const rows = menus.map((m) => {
+    const row = byId.get(m.id);
+    const snap = num(
+      row.price_per_plate_snapshot ??
+        row.price_per_plate ??
+        row.pricePerPlateSnapshot ??
+        row.pricePerPlate,
+    );
+    const nameSnap =
+      row.name_snapshot != null && String(row.name_snapshot).trim() !== ""
+        ? String(row.name_snapshot).trim()
+        : resolveLocalizedName(m.name, requestedLanguage);
+    return { menuItemId: m.id, pricePerPlateSnapshot: snap, nameSnapshot: nameSnap };
+  });
+  return { rows };
+}
+
 function serializeQuotation(q) {
   return {
     id: q.id,
@@ -55,7 +106,6 @@ function serializeQuotation(q) {
     client_name: q.clientName,
     client_phone: q.clientPhone ?? null,
     function_type: q.functionType ?? null,
-    event_name: q.eventName,
     event_date: q.eventDate?.toISOString?.() ?? q.eventDate,
     guest_count: q.guestCount,
     discount_amount: num(q.discountAmount),
@@ -65,6 +115,7 @@ function serializeQuotation(q) {
     service_charge_amount: num(q.serviceChargeAmount),
     tax_amount: num(q.taxAmount),
     total: num(q.total),
+    plate_price: q.platePrice != null ? num(q.platePrice) : null,
     menu_items: (q.menuItems || []).map((mi) => ({
       id: mi.id,
       menu_item_id: mi.menuItemId,
@@ -108,18 +159,25 @@ async function createQuotation(req, res) {
     const guests = parseInt(body.guest_count, 10) || 0;
     const discount = num(body.discount_amount ?? 0);
 
-    const snapRows = menus.map((m) => ({
-      pricePerPlateSnapshot: m.pricePerPerson,
-      menuItemId: m.id,
+    const snapBuilt = buildSnapRowsFromMenuItemsOrCatalog(body, menus, requestedLanguage);
+    if (snapBuilt.error) {
+      return errorResponse(res, snapBuilt.error, 422, "VALIDATION_ERROR");
+    }
+    const snapRowsForPricing = snapBuilt.rows.map((r) => ({
+      pricePerPlateSnapshot: r.pricePerPlateSnapshot,
     }));
-    const pricing = computeQuotationPricing(snapRows, guests, discount, sc, txp);
+    const pricing = computeQuotationPricing(snapRowsForPricing, guests, discount, sc, txp);
     const status = parseQuotationStatus(body.status, "SENT");
+    const platePriceVal = parsePlatePrice(body);
+    const platePriceDecimal =
+      platePriceVal == null ? null : new Prisma.Decimal(String(platePriceVal));
 
     const q = await prisma.$transaction(async (tx) => {
       const created = await tx.quotation.create({
         data: {
           businessId,
           status,
+          platePrice: platePriceDecimal,
           clientName: String(body.client_name ?? ""),
           clientPhone:
             body.client_phone != null && String(body.client_phone).trim() !== ""
@@ -129,7 +187,6 @@ async function createQuotation(req, res) {
             body.function_type != null && String(body.function_type).trim() !== ""
               ? String(body.function_type).trim()
               : null,
-          eventName: String(body.event_name ?? ""),
           eventDate: body.event_date ? new Date(body.event_date) : null,
           guestCount: guests,
           discountAmount: new Prisma.Decimal(String(discount)),
@@ -142,11 +199,11 @@ async function createQuotation(req, res) {
         },
       });
 
-      const rows = menus.map((m) => ({
+      const rows = snapBuilt.rows.map((r) => ({
         quotationId: created.id,
-        menuItemId: m.id,
-        pricePerPlateSnapshot: m.pricePerPerson,
-        nameSnapshot: resolveLocalizedName(m.name, requestedLanguage),
+        menuItemId: r.menuItemId,
+        pricePerPlateSnapshot: r.pricePerPlateSnapshot,
+        nameSnapshot: r.nameSnapshot,
       }));
       if (rows.length) {
         await tx.quotationMenuItem.createMany({ data: rows });
@@ -253,8 +310,14 @@ async function updateQuotation(req, res) {
     const txp = body.tax_pct != null ? num(body.tax_pct) : num(existing.taxPct);
 
     let snapRows;
+    let snapBuiltForTx = null;
     if (menus.length) {
-      snapRows = menus.map((m) => ({ pricePerPlateSnapshot: m.pricePerPerson }));
+      const snapBuilt = buildSnapRowsFromMenuItemsOrCatalog(body, menus, requestedLanguage);
+      if (snapBuilt.error) {
+        return errorResponse(res, snapBuilt.error, 422, "VALIDATION_ERROR");
+      }
+      snapBuiltForTx = snapBuilt;
+      snapRows = snapBuilt.rows.map((r) => ({ pricePerPlateSnapshot: r.pricePerPlateSnapshot }));
     } else {
       snapRows = existing.menuItems.map((mi) => ({
         pricePerPlateSnapshot: mi.pricePerPlateSnapshot,
@@ -262,14 +325,16 @@ async function updateQuotation(req, res) {
     }
     const pricing = computeQuotationPricing(snapRows, guests, discount, sc, txp);
 
+    const platePricePatch = parsePlatePrice(body);
+
     const updated = await prisma.$transaction(async (tx) => {
-      if (menus.length) {
+      if (menus.length && snapBuiltForTx) {
         await tx.quotationMenuItem.deleteMany({ where: { quotationId: id } });
-        const rows = menus.map((m) => ({
+        const rows = snapBuiltForTx.rows.map((r) => ({
           quotationId: id,
-          menuItemId: m.id,
-          pricePerPlateSnapshot: m.pricePerPerson,
-          nameSnapshot: resolveLocalizedName(m.name, requestedLanguage),
+          menuItemId: r.menuItemId,
+          pricePerPlateSnapshot: r.pricePerPlateSnapshot,
+          nameSnapshot: r.nameSnapshot,
         }));
         if (rows.length) await tx.quotationMenuItem.createMany({ data: rows });
       }
@@ -277,6 +342,14 @@ async function updateQuotation(req, res) {
       return tx.quotation.update({
         where: { id },
         data: {
+          ...(platePricePatch !== undefined
+            ? {
+                platePrice:
+                  platePricePatch === null
+                    ? null
+                    : new Prisma.Decimal(String(platePricePatch)),
+              }
+            : {}),
           ...(body.status !== undefined
             ? { status: parseQuotationStatus(body.status, existing.status) }
             : {}),
@@ -293,7 +366,6 @@ async function updateQuotation(req, res) {
                 ? String(body.function_type).trim()
                 : null
               : existing.functionType,
-          eventName: body.event_name !== undefined ? String(body.event_name) : existing.eventName,
           eventDate:
             body.event_date !== undefined
               ? body.event_date

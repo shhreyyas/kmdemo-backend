@@ -30,6 +30,31 @@ function num(d) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Express may expose query keys as arrays — normalize to a single string. */
+function queryStringParam(val) {
+  if (val == null || val === "") return "";
+  const first = Array.isArray(val) ? val[0] : val;
+  return typeof first === "string" ? first : "";
+}
+
+/**
+ * Parse `limit` / `offset`-style query params (arrays allowed).
+ * @param {unknown} val
+ * @param {number} fallback
+ * @param {{ min?: number; max?: number }} [opts]
+ */
+function queryNumberParam(val, fallback, opts = {}) {
+  const min = opts.min ?? Number.NEGATIVE_INFINITY;
+  const max = opts.max ?? Number.POSITIVE_INFINITY;
+  if (val == null || val === "") return fallback;
+  const raw = Array.isArray(val) ? val[0] : val;
+  const n = parseInt(String(raw), 10);
+  if (!Number.isFinite(n)) return fallback;
+  if (n < min) return min;
+  if (n > max) return max;
+  return n;
+}
+
 function computePricingFromSnapshots(rows, guestCount, discount, servicePct, taxPct) {
   const guests = Math.max(0, Math.floor(Number(guestCount) || 0));
   const perPlateTotal = rows.reduce((s, r) => {
@@ -1084,33 +1109,85 @@ async function listBookings(req, res) {
       offset,
     } = req.query;
 
-    const where = { businessId };
+    /** Read from req.query so `q` is never dropped by destructuring; alias `search` for proxies. */
+    const searchQRaw = (
+      queryStringParam(req.query.q) || queryStringParam(req.query.search)
+    )
+      .trim()
+      .slice(0, 160);
+
+    /** Single explicit AND avoids Prisma quirks mixing top-level filters with `where.AND`. */
+    const clauses = [{ businessId }];
     if (status) {
-      where.status = status;
+      clauses.push({ status });
     }
     if (payment_status) {
-      where.paymentStatus = payment_status;
+      clauses.push({ paymentStatus: payment_status });
     }
     if (event_from || event_to) {
-      where.eventAt = {};
-      if (event_from) where.eventAt.gte = new Date(event_from);
-      if (event_to) where.eventAt.lte = new Date(event_to);
+      const eventRange = {};
+      if (event_from) eventRange.gte = new Date(event_from);
+      if (event_to) eventRange.lte = new Date(event_to);
+      /** Match legacy `booking.eventAt` OR any child `BookingEvent.eventAt` in range. */
+      clauses.push({
+        OR: [
+          { eventAt: eventRange },
+          {
+            events: {
+              some: {
+                eventAt: eventRange,
+              },
+            },
+          },
+        ],
+      });
+    }
+    if (searchQRaw.length > 0) {
+      /** Match client, contact, booking code, venues, types, notes; nested events. */
+      const ic = { contains: searchQRaw, mode: "insensitive" };
+      const eventRowsOr = [
+        { eventLocation: ic },
+        { functionType: ic },
+        { notes: ic },
+      ];
+      clauses.push({
+        OR: [
+          { customerName: ic },
+          { customerPhone: ic },
+          { bookingCode: ic },
+          { customerEmail: ic },
+          { eventLocation: ic },
+          { functionType: ic },
+          { notes: ic },
+          {
+            events: {
+              some: {
+                OR: eventRowsOr,
+              },
+            },
+          },
+        ],
+      });
     }
     if (created_from || created_to) {
-      where.createdAt = {};
-      if (created_from) where.createdAt.gte = new Date(created_from);
-      if (created_to) where.createdAt.lte = new Date(created_to);
+      const createdAt = {};
+      if (created_from) createdAt.gte = new Date(created_from);
+      if (created_to) createdAt.lte = new Date(created_to);
+      clauses.push({ createdAt });
     }
     if (completed_from || completed_to) {
-      where.completedAt = {};
-      if (completed_from) where.completedAt.gte = new Date(completed_from);
-      if (completed_to) where.completedAt.lte = new Date(completed_to);
+      const completedAt = {};
+      if (completed_from) completedAt.gte = new Date(completed_from);
+      if (completed_to) completedAt.lte = new Date(completed_to);
+      clauses.push({ completedAt });
     } else if (manual_completed_only === "true") {
-      where.completedAt = { not: null };
+      clauses.push({ completedAt: { not: null } });
     }
 
-    const take = Math.min(200, parseInt(limit, 10) || 50);
-    const skip = parseInt(offset, 10) || 0;
+    const where = { AND: clauses };
+
+    const take = queryNumberParam(limit, 50, { min: 1, max: 200 });
+    const skip = queryNumberParam(offset, 0, { min: 0, max: 100_000 });
 
     const useCompletionSort =
       manual_completed_only === "true" || completed_from || completed_to;
@@ -1132,9 +1209,14 @@ async function listBookings(req, res) {
       prisma.booking.count({ where }),
     ]);
 
+    const has_more = skip + rows.length < total;
+
     return successResponse(res, "OK", {
       bookings: rows.map((b) => serializeBooking(b)),
       total,
+      limit: take,
+      offset: skip,
+      has_more,
     });
   } catch (e) {
     console.error("listBookings:", e);
