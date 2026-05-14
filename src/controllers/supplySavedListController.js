@@ -16,6 +16,16 @@ function supplyVisibilityOrBranches(businessId, userId) {
   ];
 }
 
+function utensilStockExceededMessage(source, requestedQty) {
+  if (source.type !== "UTENSIL" || source.availableCount == null) return null;
+  const q = parseInt(String(requestedQty), 10);
+  const qty = Number.isFinite(q) ? q : 0;
+  if (qty > source.availableCount) {
+    return "Quantity cannot exceed remaining stock for this utensil";
+  }
+  return null;
+}
+
 function formatTitleDate(d) {
   const dt = d instanceof Date ? d : new Date(d);
   return new Intl.DateTimeFormat("en-GB", {
@@ -212,6 +222,7 @@ function formatSavedListSummary(row, lang) {
   return {
     id: row.id,
     title: row.title,
+    booking_event_id: row.bookingEventId ?? null,
     item_count: row._count?.items ?? row.items?.length ?? 0,
     categories_label: row.categoriesLabel ?? null,
     created_at: row.createdAt?.toISOString?.() ?? row.createdAt,
@@ -246,7 +257,13 @@ async function listSupplySavedLists(req, res) {
     );
     const skip = (page - 1) * limit;
 
+    const bookingEventIdFilter = String(
+      req.query.booking_event_id ?? "",
+    ).trim();
     const where = { businessId };
+    if (bookingEventIdFilter) {
+      where.bookingEventId = bookingEventIdFilter;
+    }
 
     const [total, rows] = await prisma.$transaction([
       prisma.supplySavedList.count({ where }),
@@ -258,6 +275,7 @@ async function listSupplySavedLists(req, res) {
         select: {
           id: true,
           title: true,
+          bookingEventId: true,
           categoriesLabel: true,
           createdAt: true,
           updatedAt: true,
@@ -448,6 +466,168 @@ async function updateSupplySavedList(req, res) {
   }
 }
 
+/**
+ * Link a saved list to a booking event and copy its lines onto the event
+ * (ingredient + utensil rows). Other lists previously linked to this event are unlinked.
+ */
+async function assignSupplySavedListToBookingEvent(req, res) {
+  try {
+    const businessId = req.businessId;
+    const userId = req.user?.userId;
+    const listId = String(req.params.id || "").trim();
+    const body = req.body || {};
+    const bookingId = String(body.booking_id || "").trim();
+    const eventId = String(body.booking_event_id || "").trim();
+
+    if (!businessId || !listId || !bookingId || !eventId) {
+      return errorResponse(res, "Invalid request", 200, "VALIDATION_ERROR");
+    }
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, businessId },
+      select: { id: true, status: true },
+    });
+    if (!booking) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    if (booking.status === "CANCELLED") {
+      return errorResponse(
+        res,
+        "Cancelled booking cannot be updated",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const event = await prisma.bookingEvent.findFirst({
+      where: { id: eventId, bookingId },
+      select: { id: true },
+    });
+    if (!event) {
+      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+    }
+
+    const list = await prisma.supplySavedList.findFirst({
+      where: { id: listId, businessId },
+      include: {
+        items: { orderBy: { createdAt: "asc" } },
+      },
+    });
+    if (!list) {
+      return errorResponse(res, "List not found", 404, "NOT_FOUND");
+    }
+    if (!list.items.length) {
+      return errorResponse(res, "List has no items", 200, "VALIDATION_ERROR");
+    }
+
+    const ids = [...new Set(list.items.map((i) => i.supplyItemId))];
+    const supplyRows = await prisma.supplyItem.findMany({
+      where: {
+        id: { in: ids },
+        isActive: true,
+        OR: supplyVisibilityOrBranches(businessId, userId),
+      },
+      include: { category: true },
+    });
+    const byId = new Map(supplyRows.map((r) => [r.id, r]));
+    if (supplyRows.length !== ids.length) {
+      return errorResponse(
+        res,
+        "One or more supply items not found",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    for (const row of supplyRows) {
+      if (row.businessId != null && row.businessId !== businessId) {
+        return errorResponse(
+          res,
+          "One or more supply items not found",
+          200,
+          "VALIDATION_ERROR",
+        );
+      }
+    }
+
+    const ingredientPayload = [];
+    const utensilPayload = [];
+    for (const line of list.items) {
+      const source = byId.get(line.supplyItemId);
+      if (!source) continue;
+      const row = {
+        supply_item_id: line.supplyItemId,
+        quantity: line.quantity,
+        unit: String(line.unit || source.defaultUnit || "kg"),
+      };
+      if (source.type === "UTENSIL") {
+        const msg = utensilStockExceededMessage(source, row.quantity);
+        if (msg) return errorResponse(res, msg, 200, "VALIDATION_ERROR");
+        utensilPayload.push(row);
+      } else {
+        ingredientPayload.push(row);
+      }
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.supplySavedList.updateMany({
+        where: { businessId, bookingEventId: eventId, id: { not: listId } },
+        data: { bookingEventId: null },
+      });
+
+      await tx.supplySavedList.update({
+        where: { id: listId },
+        data: { bookingEventId: eventId },
+      });
+
+      for (const itemType of ["INGREDIENT", "UTENSIL"]) {
+        const payload =
+          itemType === "INGREDIENT" ? ingredientPayload : utensilPayload;
+        await tx.bookingEventSupplyItem.deleteMany({
+          where: { bookingEventId: eventId, itemType },
+        });
+        if (payload.length) {
+          await tx.bookingEventSupplyItem.createMany({
+            data: payload.map((row) => {
+              const source = byId.get(String(row.supply_item_id));
+              let qty = Math.max(
+                1,
+                Math.min(999, parseInt(String(row.quantity), 10) || 1),
+              );
+              if (
+                itemType === "UTENSIL" &&
+                source.availableCount != null &&
+                qty > source.availableCount
+              ) {
+                qty = source.availableCount;
+              }
+              return {
+                bookingEventId: eventId,
+                supplyItemId: source.id,
+                itemType,
+                quantity: qty,
+                unit: String(
+                  row.unit || source.defaultUnit || (itemType === "UTENSIL" ? "pcs" : "kg"),
+                ),
+                categorySlug: source.categorySlug,
+                nameSnapshot: source.name,
+              };
+            }),
+          });
+        }
+      }
+    });
+
+    return successResponse(res, "Supply list assigned to event", {
+      ok: true,
+      list_id: listId,
+    });
+  } catch (e) {
+    console.error("assignSupplySavedListToBookingEvent:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 async function deleteSupplySavedList(req, res) {
   try {
     const businessId = req.businessId;
@@ -477,5 +657,6 @@ module.exports = {
   listSupplySavedLists,
   getSupplySavedList,
   updateSupplySavedList,
+  assignSupplySavedListToBookingEvent,
   deleteSupplySavedList,
 };
