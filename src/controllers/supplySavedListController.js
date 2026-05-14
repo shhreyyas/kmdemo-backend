@@ -61,6 +61,12 @@ function serializeSavedItem(row, lang) {
   };
 }
 
+function normalizeCustomTitle(raw) {
+  const value = String(raw ?? "").trim();
+  if (!value) return null;
+  return value.slice(0, 512);
+}
+
 async function createSupplySavedList(req, res) {
   try {
     const businessId = req.businessId;
@@ -145,12 +151,10 @@ async function createSupplySavedList(req, res) {
           : slug,
       );
 
-    const title = buildSavedListTitle({
-      booking,
-      bookingEvent,
-      categoryLabels,
-      at: new Date(),
-    });
+    const title = normalizeCustomTitle(body.title);
+    if (!title) {
+      return errorResponse(res, "List name is required", 200, "VALIDATION_ERROR");
+    }
     const categoriesLabel =
       categoryLabels.length <= 1
         ? categoryLabels[0] ?? ""
@@ -394,12 +398,8 @@ async function updateSupplySavedList(req, res) {
           : slug,
       );
 
-    const title = buildSavedListTitle({
-      booking,
-      bookingEvent,
-      categoryLabels,
-      at: new Date(),
-    });
+    const customTitle = normalizeCustomTitle(body.title);
+    const title = customTitle ?? existing.title;
     const categoriesLabel =
       categoryLabels.length <= 1
         ? categoryLabels[0] ?? ""
@@ -448,9 +448,34 @@ async function updateSupplySavedList(req, res) {
   }
 }
 
+async function deleteSupplySavedList(req, res) {
+  try {
+    const businessId = req.businessId;
+    const id = String(req.params.id || "").trim();
+    if (!businessId || !id) {
+      return errorResponse(res, "Invalid request", 200, "VALIDATION_ERROR");
+    }
+
+    const existing = await prisma.supplySavedList.findFirst({
+      where: { id, businessId },
+      select: { id: true },
+    });
+    if (!existing) {
+      return errorResponse(res, "List not found", 404, "NOT_FOUND");
+    }
+
+    await prisma.supplySavedList.delete({ where: { id } });
+    return successResponse(res, "Supply list deleted", { id });
+  } catch (e) {
+    console.error("deleteSupplySavedList:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 module.exports = {
   createSupplySavedList,
   listSupplySavedLists,
   getSupplySavedList,
   updateSupplySavedList,
+  deleteSupplySavedList,
 };

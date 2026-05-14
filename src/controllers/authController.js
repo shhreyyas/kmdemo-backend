@@ -3,6 +3,10 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { successResponse, errorResponse } = require("../utils/response");
 const { sendOtpEmail } = require("../utils/email");
+const {
+  formatUserResponse,
+  validatePdfPrefix,
+} = require("../utils/formatUser");
 
 const validatePassword = (password) => {
   const regex = /^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
@@ -160,22 +164,12 @@ exports.signup = async (req, res) => {
       { expiresIn: "7d" },
     );
 
-    const formattedUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      contact: user.phoneNumber,
-      profile_pic: user.profileImageUrl ?? null,
-      status: user.isVerified ? 1 : 0,
+    const formattedUser = formatUserResponse(user, {
       user_type: 1,
-      notification_status: notificationStatus,
       email_verified_at: null,
       device_type,
       fcm_token: fcm_token || null,
-      created_at: user.createdAt,
-      updated_at: user.updatedAt,
-      deleted_at: user.deletedAt,
-    };
+    });
 
     return res.status(200).json({
       success: true,
@@ -277,22 +271,13 @@ exports.verifyOtp = async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
 
-    const formattedUser = {
-      id: updatedUser.id,
-      name: updatedUser.name,
-      email: updatedUser.email,
-      contact: updatedUser.phoneNumber,
-      profile_pic: updatedUser.profileImageUrl ?? null,
+    const formattedUser = formatUserResponse(updatedUser, {
       status: 1,
       user_type: 1,
-      notification_status: updatedUser.notificationStatus,
       user_verified_at: verifiedAt.toISOString(),
       device_type: device?.deviceType ?? null,
       fcm_token: device?.fcmToken ?? null,
-      created_at: updatedUser.createdAt,
-      updated_at: updatedUser.updatedAt,
-      deleted_at: updatedUser.deletedAt,
-    };
+    });
 
     return successResponse(
       res,
@@ -379,22 +364,12 @@ exports.signIn = async (req, res) => {
         data: { notificationStatus },
       });
 
-      const formattedUser = {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        contact: user.phoneNumber,
-        profile_pic: user.profileImageUrl ?? null,
+      const formattedUser = formatUserResponse(user, {
         status: 1,
-        notification_status: notificationStatus,
-        user_verified_at: user.userVerifiedAt?.toISOString() ?? null,
         device_type,
         fcm_token: fcm_token || null,
         business_details: await loadBusinessDetailsArray(user.businessId),
-        created_at: user.createdAt,
-        updated_at: user.updatedAt,
-        deleted_at: user.deletedAt,
-      };
+      });
 
       return res.status(200).json({
         success: true,
@@ -422,22 +397,12 @@ exports.signIn = async (req, res) => {
 
     const business_details = await loadBusinessDetailsArray(user.businessId);
 
-    const formattedUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      contact: user.phoneNumber,
-      profile_pic: user.profileImageUrl ?? null,
+    const formattedUser = formatUserResponse(user, {
       status: 1,
-      notification_status: notificationStatus,
-      user_verified_at: user.userVerifiedAt?.toISOString() ?? null,
       device_type,
       fcm_token: fcm_token || null,
       business_details,
-      created_at: user.createdAt,
-      updated_at: user.updatedAt,
-      deleted_at: user.deletedAt,
-    };
+    });
 
     return res.status(200).json({
       success: true,
@@ -689,7 +654,7 @@ exports.newPassword = async (req, res) => {
 exports.updateUserProfile = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { name, contact, profile_pic } = req.body;
+    const { name, contact, profile_pic, pdf_prefix } = req.body;
 
     const data = {};
     if (name !== undefined && String(name).trim()) {
@@ -704,6 +669,18 @@ exports.updateUserProfile = async (req, res) => {
         profile_pic === null || profile_pic === ""
           ? null
           : String(profile_pic).trim();
+    }
+    if (pdf_prefix !== undefined) {
+      const trimmed = String(pdf_prefix).trim();
+      if (!validatePdfPrefix(trimmed)) {
+        return errorResponse(
+          res,
+          "PDF prefix must be 2-24 characters and use letters, numbers, - or _",
+          200,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.pdfPrefix = trimmed;
     }
 
     if (Object.keys(data).length === 0) {
@@ -737,23 +714,13 @@ exports.updateUserProfile = async (req, res) => {
       { expiresIn: "7d" },
     );
 
-    const formattedUser = {
-      id: updated.id,
-      name: updated.name,
-      email: updated.email,
-      contact: updated.phoneNumber,
-      profile_pic: updated.profileImageUrl ?? null,
-      status: updated.isVerified ? 1 : 0,
+    const formattedUser = formatUserResponse(updated, {
+      status: 1,
       user_type: 1,
-      notification_status: updated.notificationStatus,
-      user_verified_at: updated.userVerifiedAt?.toISOString() ?? null,
       device_type: device?.deviceType ?? null,
       fcm_token: device?.fcmToken ?? null,
       business_details,
-      created_at: updated.createdAt,
-      updated_at: updated.updatedAt,
-      deleted_at: updated.deletedAt,
-    };
+    });
 
     return successResponse(
       res,

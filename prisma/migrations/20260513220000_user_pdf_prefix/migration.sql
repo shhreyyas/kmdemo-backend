@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "User" ADD COLUMN "pdfPrefix" TEXT DEFAULT 'KAT-2024';

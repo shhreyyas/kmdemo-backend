@@ -3,6 +3,11 @@ const jwt = require("jsonwebtoken");
 const { successResponse, errorResponse } = require("../utils/response");
 const { formatBusinessDetail } = require("./authController");
 const {
+  deriveDefaultPdfPrefix,
+  formatUserResponse,
+  isUnsetPdfPrefix,
+} = require("../utils/formatUser");
+const {
   getRequestedLanguage,
   normalizeLocalizedName,
   resolveLocalizedName,
@@ -274,9 +279,14 @@ exports.registerBusiness = async (req, res) => {
         });
       }
 
+      const userUpdate = { businessId: b.id };
+      if (isUnsetPdfPrefix(user.pdfPrefix)) {
+        userUpdate.pdfPrefix = deriveDefaultPdfPrefix(business_name);
+      }
+
       await tx.user.update({
         where: { id: userId },
-        data: { businessId: b.id },
+        data: userUpdate,
       });
 
       return b;
@@ -304,22 +314,12 @@ exports.registerBusiness = async (req, res) => {
       where: { id: userId },
     });
 
-    const formattedUser = {
-      id: refreshed.id,
-      name: refreshed.name,
-      email: refreshed.email,
-      contact: refreshed.phoneNumber,
-      profile_pic: refreshed.profileImageUrl ?? null,
+    const formattedUser = formatUserResponse(refreshed, {
       status: 1,
-      notification_status: refreshed.notificationStatus,
-      user_verified_at: refreshed.userVerifiedAt?.toISOString() ?? null,
       device_type: device?.deviceType ?? null,
       fcm_token: device?.fcmToken ?? null,
       business_details,
-      created_at: refreshed.createdAt,
-      updated_at: refreshed.updatedAt,
-      deleted_at: refreshed.deletedAt,
-    };
+    });
 
     return successResponse(
       res,
@@ -418,22 +418,12 @@ exports.updateBusiness = async (req, res) => {
     const device = user.devices[0];
     const business_details = [formatBusinessDetail(fullBusiness)];
 
-    const formattedUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      contact: user.phoneNumber,
-      profile_pic: user.profileImageUrl ?? null,
+    const formattedUser = formatUserResponse(user, {
       status: 1,
-      notification_status: user.notificationStatus,
-      user_verified_at: user.userVerifiedAt?.toISOString() ?? null,
       device_type: device?.deviceType ?? null,
       fcm_token: device?.fcmToken ?? null,
       business_details,
-      created_at: user.createdAt,
-      updated_at: user.updatedAt,
-      deleted_at: user.deletedAt,
-    };
+    });
 
     return successResponse(
       res,

@@ -126,6 +126,7 @@ model User {
   passwordHash       String
   phoneNumber        String?
   profileImageUrl    String?
+  pdfPrefix          String?   @default("KAT-2024")
   role               String    @default("owner")
   isVerified         Boolean   @default(false)
   notificationStatus Int       @default(1)
@@ -263,6 +264,7 @@ enum SupplyItemType {
 
 enum QuotationStatus {
   DRAFT
+  SALE
   SENT
   ACCEPTED
 }
@@ -504,7 +506,7 @@ model Quotation {
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
-  status QuotationStatus @default(SENT)
+  status QuotationStatus @default(SALE)
 
   clientName  String
   clientPhone String?

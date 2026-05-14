@@ -38,12 +38,14 @@ function parsePlatePrice(body) {
   return n;
 }
 
-/** @param {unknown} bodyStatus @param {"DRAFT"|"SENT"|"ACCEPTED"} [fallback] */
-function parseQuotationStatus(bodyStatus, fallback = "SENT") {
+/** @param {unknown} bodyStatus @param {"DRAFT"|"SALE"|"SENT"|"ACCEPTED"} [fallback] */
+function parseQuotationStatus(bodyStatus, fallback = "SALE") {
   const raw = String(bodyStatus ?? fallback).toUpperCase();
   if (raw === "DRAFT") return "DRAFT";
+  if (raw === "SALE") return "SALE";
   if (raw === "ACCEPTED") return "ACCEPTED";
-  return "SENT";
+  if (raw === "SENT") return "SENT";
+  return fallback;
 }
 
 function computeQuotationPricing(rows, guestCount, discount, servicePct, taxPct) {
@@ -102,7 +104,7 @@ function serializeQuotation(q) {
   return {
     id: q.id,
     business_id: q.businessId,
-    status: q.status ?? "SENT",
+    status: q.status ?? "SALE",
     client_name: q.clientName,
     client_phone: q.clientPhone ?? null,
     function_type: q.functionType ?? null,
@@ -167,7 +169,7 @@ async function createQuotation(req, res) {
       pricePerPlateSnapshot: r.pricePerPlateSnapshot,
     }));
     const pricing = computeQuotationPricing(snapRowsForPricing, guests, discount, sc, txp);
-    const status = parseQuotationStatus(body.status, "SENT");
+    const status = parseQuotationStatus(body.status, "SALE");
     const platePriceVal = parsePlatePrice(body);
     const platePriceDecimal =
       platePriceVal == null ? null : new Prisma.Decimal(String(platePriceVal));

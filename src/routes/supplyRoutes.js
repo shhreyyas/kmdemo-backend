@@ -32,6 +32,7 @@ const {
   listSupplySavedLists,
   getSupplySavedList,
   updateSupplySavedList,
+  deleteSupplySavedList,
 } = require("../controllers/supplySavedListController");
 
 router.post(
@@ -176,6 +177,12 @@ router.patch(
   authMiddleware,
   businessContextMiddleware,
   updateSupplySavedList,
+);
+router.delete(
+  "/v1/supplySavedLists/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  deleteSupplySavedList,
 );
 
 router.post(
