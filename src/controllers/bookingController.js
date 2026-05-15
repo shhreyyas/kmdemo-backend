@@ -83,15 +83,140 @@ function paymentStatusFromAmounts(amountPaid, totalDue) {
   return "PARTIAL";
 }
 
-/**
- * Menu edits allowed only until 24h before the event start (same rule as the mobile app).
- */
-function canEditMenuBeforeEvent(eventAt) {
+const EVENT_EDIT_CUTOFF_MS = 48 * 60 * 60 * 1000;
+
+/** Event/menu/customer-detail edits allowed only more than 48h before event start. */
+function canEditBeforeEventCutoff(eventAt) {
   if (!eventAt) return true;
   const start = new Date(eventAt).getTime();
   if (Number.isNaN(start)) return true;
   if (start <= Date.now()) return false;
-  return start - Date.now() > 24 * 60 * 60 * 1000;
+  return start - Date.now() > EVENT_EDIT_CUTOFF_MS;
+}
+
+function canEditMenuBeforeEvent(eventAt) {
+  return canEditBeforeEventCutoff(eventAt);
+}
+
+function canEditCustomerDetailsBeforeEvent(eventAt) {
+  return canEditBeforeEventCutoff(eventAt);
+}
+
+function primaryEventAtFromRow(b) {
+  const events = [...(b.events || [])].sort((a, c) => {
+    const ta = a.eventAt ? new Date(a.eventAt).getTime() : 0;
+    const tb = c.eventAt ? new Date(c.eventAt).getTime() : 0;
+    return ta - tb;
+  });
+  if (events.length > 0 && events[0].eventAt) {
+    return events[0].eventAt;
+  }
+  return b.eventAt ?? null;
+}
+
+/** True when patch may change plate-based totals (menu lines or guest/discount/tax). */
+function patchTouchesBookingPricing(body, existing) {
+  if (Array.isArray(body.menu_item_ids) && body.menu_item_ids.length) return true;
+  if (Array.isArray(body.menu_items) && body.menu_items.length) return true;
+  if (
+    body.discount_amount !== undefined ||
+    body.service_charge_pct !== undefined ||
+    body.tax_pct !== undefined
+  ) {
+    return true;
+  }
+  if (body.guest_count !== undefined) {
+    const next = body.guest_count != null ? parseInt(body.guest_count, 10) : null;
+    if (next !== (existing.guestCount ?? null)) return true;
+  }
+  const firstEvent =
+    Array.isArray(body.events) && body.events.length > 0 ? body.events[0] : null;
+  if (firstEvent?.guest_count !== undefined) {
+    const next = firstEvent.guest_count != null ? parseInt(firstEvent.guest_count, 10) : null;
+    if (next !== (existing.guestCount ?? null)) return true;
+  }
+  if (Array.isArray(body.events)) {
+    for (const raw of body.events) {
+      const ev = raw || {};
+      if (ev.guest_count === undefined || !ev.id) continue;
+      const cur = (existing.events || []).find((row) => row.id === ev.id);
+      if (!cur) continue;
+      const next = ev.guest_count != null ? parseInt(ev.guest_count, 10) : null;
+      if (next !== (cur.guestCount ?? null)) return true;
+    }
+  }
+  return false;
+}
+
+const CONFIRMED_LIMITED_PATCH_TOP = new Set([
+  "customer_name",
+  "customer_phone",
+  "customer_email",
+  "event_at",
+  "event_location",
+  "function_type",
+  "guest_count",
+  "notes",
+  "events",
+  "updated_at",
+  "update_reason",
+  "step_number",
+]);
+
+const CONFIRMED_LIMITED_PATCH_EVENT_KEYS = new Set([
+  "id",
+  "event_at",
+  "event_location",
+  "function_type",
+  "guest_count",
+  "notes",
+  "status",
+]);
+
+/** Sent by the app for pass-through; not applied on confirmed limited patch. */
+const CONFIRMED_LIMITED_PATCH_EVENT_IGNORE = new Set([
+  "dish_id",
+  "parent_dish_id",
+  "is_template",
+  "event_snapshot",
+  "event_total",
+]);
+
+/**
+ * Confirmed booking: customer + event detail fields (not menu/snapshot), within 48h rule.
+ */
+function isConfirmedLimitedPatch(body) {
+  const keys = Object.keys(body || {}).filter((k) => body[k] !== undefined);
+  if (keys.length === 0) return false;
+  for (const k of keys) {
+    if (!CONFIRMED_LIMITED_PATCH_TOP.has(k)) return false;
+  }
+  if (Array.isArray(body.events)) {
+    for (const raw of body.events) {
+      const ev = raw || {};
+      const evKeys = Object.keys(ev).filter((k) => ev[k] !== undefined);
+      for (const k of evKeys) {
+        if (CONFIRMED_LIMITED_PATCH_EVENT_IGNORE.has(k)) continue;
+        if (!CONFIRMED_LIMITED_PATCH_EVENT_KEYS.has(k)) return false;
+      }
+    }
+  }
+  return (
+    body.customer_name !== undefined ||
+    body.customer_phone !== undefined ||
+    body.customer_email !== undefined ||
+    body.event_at !== undefined ||
+    body.event_location !== undefined ||
+    body.function_type !== undefined ||
+    body.guest_count !== undefined ||
+    body.notes !== undefined ||
+    (Array.isArray(body.events) && body.events.length > 0)
+  );
+}
+
+/** @deprecated use isConfirmedLimitedPatch */
+function isCustomerDetailsOnlyPatch(body) {
+  return isConfirmedLimitedPatch(body);
 }
 
 function deriveEventSubtotal(ev) {
@@ -164,18 +289,6 @@ async function enrichEventSnapshotMenuImages(booking) {
     return booking;
   }
 
-  const idSet = new Set();
-  for (const ev of booking.events) {
-    const rows = ev?.eventSnapshot?.menu_items;
-    if (!Array.isArray(rows)) continue;
-    for (const row of rows) {
-      const id = String(row?.id ?? "").trim();
-      if (id) idSet.add(id);
-    }
-  }
-
-  if (idSet.size === 0) return booking;
-
   const snapshotImageByMenuId = new Map();
   for (const mi of booking.menuItems || []) {
     const mid = String(mi?.menuItemId ?? "").trim();
@@ -185,11 +298,34 @@ async function enrichEventSnapshotMenuImages(booking) {
     }
   }
 
-  const menuRows = await prisma.menuItem.findMany({
-    where: { id: { in: [...idSet] } },
-    select: { id: true, imageUrl: true },
-  });
-  const liveImageByMenuId = new Map(menuRows.map((m) => [m.id, m.imageUrl || null]));
+  const needsLiveLookup = new Set();
+  let needsEnrichment = false;
+  for (const ev of booking.events) {
+    const rows = ev?.eventSnapshot?.menu_items;
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (row?.image_url) continue;
+      const id = String(row?.id ?? "").trim();
+      if (!id) continue;
+      needsEnrichment = true;
+      if (!snapshotImageByMenuId.has(id)) {
+        needsLiveLookup.add(id);
+      }
+    }
+  }
+
+  if (!needsEnrichment) return booking;
+
+  const liveImageByMenuId = new Map();
+  if (needsLiveLookup.size > 0) {
+    const menuRows = await prisma.menuItem.findMany({
+      where: { id: { in: [...needsLiveLookup] } },
+      select: { id: true, imageUrl: true },
+    });
+    for (const m of menuRows) {
+      liveImageByMenuId.set(m.id, m.imageUrl || null);
+    }
+  }
 
   const enrichedEvents = booking.events.map((ev) => {
     const snapshot = ev?.eventSnapshot;
@@ -304,6 +440,9 @@ function serializeBooking(b, { includePayments = true } = {}) {
     events: serializedEvents,
     ...(payments !== undefined ? { payments } : {}),
     can_edit_menu: canEditMenuBeforeEvent(firstEvent?.event_at ?? bookingAtIso),
+    can_edit_customer_details: canEditCustomerDetailsBeforeEvent(
+      firstEvent?.event_at ?? bookingAtIso,
+    ),
     created_at: b.createdAt?.toISOString?.() ?? b.createdAt,
     updated_at: b.updatedAt?.toISOString?.() ?? b.updatedAt,
     completed_at: b.completedAt?.toISOString?.() ?? b.completedAt ?? null,
@@ -471,7 +610,7 @@ async function patchBooking(req, res) {
     const body = req.body || {};
 
     const existing = await loadBookingForBusiness(bookingId, businessId, {
-      includePayments: true,
+      includePayments: false,
     });
     if (!existing) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
@@ -505,9 +644,10 @@ async function patchBooking(req, res) {
     const nextGuestCount = firstEvent?.guest_count ?? body.guest_count;
     const nextNotes = firstEvent?.notes ?? body.notes;
 
-    // Post-confirm lock granularity:
-    // confirmed bookings allow only payment/status flows via dedicated endpoints;
-    // block menu/event editing from patch route.
+    const confirmedLimitedPatch = !isDraft && isConfirmedLimitedPatch(body);
+    const eventAtForCutoff = primaryEventAtFromRow(existing);
+
+    // Post-confirm: customer + event details (>48h before event); menu still locked.
     if (!isDraft) {
       const touchesMenu = menuItemIds != null || menuLines != null;
       const touchesEvents = Array.isArray(body.events);
@@ -517,10 +657,39 @@ async function patchBooking(req, res) {
         body.function_type !== undefined ||
         body.guest_count !== undefined ||
         body.notes !== undefined;
-      if (touchesMenu || touchesEvents || touchesEventFields) {
+
+      if (confirmedLimitedPatch) {
+        if (!canEditBeforeEventCutoff(eventAtForCutoff)) {
+          return errorResponse(
+            res,
+            "Booking details can only be updated more than 48 hours before the event.",
+            200,
+            "VALIDATION_ERROR",
+          );
+        }
+        if (touchesMenu) {
+          return errorResponse(
+            res,
+            "Confirmed booking is locked for menu updates.",
+            200,
+            "VALIDATION_ERROR",
+          );
+        }
+      } else if (touchesMenu || touchesEvents || touchesEventFields) {
         return errorResponse(
           res,
           "Confirmed booking is locked for event/menu updates.",
+          200,
+          "VALIDATION_ERROR",
+        );
+      } else if (
+        body.customer_name !== undefined ||
+        body.customer_phone !== undefined ||
+        body.customer_email !== undefined
+      ) {
+        return errorResponse(
+          res,
+          "Confirmed booking is locked for customer updates.",
           200,
           "VALIDATION_ERROR",
         );
@@ -528,10 +697,11 @@ async function patchBooking(req, res) {
     }
 
     if (menuItemIds != null || menuLines != null) {
-      if (!isDraft && !canEditMenuBeforeEvent(existing.eventAt)) {
+      const menuCutoffAt = primaryEventAtFromRow(existing) ?? existing.eventAt;
+      if (!canEditMenuBeforeEvent(menuCutoffAt)) {
         return errorResponse(
           res,
-          "Menu can no longer be edited for this event date",
+          "Menu can only be edited more than 48 hours before the event.",
           200,
           "VALIDATION_ERROR",
         );
@@ -590,7 +760,100 @@ async function patchBooking(req, res) {
       }
     }
 
-    if (Array.isArray(body.events)) {
+    if (
+      confirmedLimitedPatch &&
+      !isDraft &&
+      body.event_at !== undefined &&
+      !Array.isArray(body.events)
+    ) {
+      const sortedEvents = [...(existing.events || [])].sort((a, c) => {
+        const ta = a.eventAt ? new Date(a.eventAt).getTime() : 0;
+        const tb = c.eventAt ? new Date(c.eventAt).getTime() : 0;
+        return ta - tb;
+      });
+      const primary = sortedEvents[0];
+      if (primary?.id) {
+        await prisma.bookingEvent.update({
+          where: { id: primary.id },
+          data: {
+            eventAt: body.event_at ? new Date(body.event_at) : null,
+          },
+        });
+      }
+    }
+
+    if (Array.isArray(body.events) && confirmedLimitedPatch && !isDraft) {
+      const confirmedEventUpdates = [];
+      for (const rawEvent of body.events) {
+        const ev = rawEvent || {};
+        if (!ev.id) {
+          return errorResponse(
+            res,
+            "Cannot add events to a confirmed booking from this screen.",
+            200,
+            "VALIDATION_ERROR",
+          );
+        }
+        const exists = (existing.events || []).find((row) => row.id === ev.id);
+        if (!exists) {
+          return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+        }
+        const cutoffAt = exists.eventAt ?? eventAtForCutoff;
+        if (!canEditBeforeEventCutoff(cutoffAt)) {
+          return errorResponse(
+            res,
+            "Event can only be updated more than 48 hours before the event time.",
+            200,
+            "VALIDATION_ERROR",
+          );
+        }
+        confirmedEventUpdates.push({
+          id: ev.id,
+          data: {
+            eventAt:
+              ev.event_at !== undefined
+                ? ev.event_at
+                  ? new Date(ev.event_at)
+                  : null
+                : exists.eventAt,
+            eventLocation:
+              ev.event_location !== undefined ? ev.event_location : exists.eventLocation,
+            functionType:
+              ev.function_type !== undefined ? ev.function_type : exists.functionType,
+            guestCount:
+              ev.guest_count !== undefined
+                ? ev.guest_count != null
+                  ? parseInt(ev.guest_count, 10)
+                  : null
+                : exists.guestCount,
+            notes: ev.notes !== undefined ? ev.notes : exists.notes,
+            status: ev.status !== undefined ? ev.status : exists.status,
+          },
+        });
+      }
+      if (confirmedEventUpdates.length) {
+        await prisma.$transaction(
+          confirmedEventUpdates.map((row) =>
+            prisma.bookingEvent.update({ where: { id: row.id }, data: row.data }),
+          ),
+        );
+      }
+    }
+
+    if (Array.isArray(body.events) && !(confirmedLimitedPatch && !isDraft)) {
+      for (const rawEvent of body.events) {
+        const ev = rawEvent || {};
+        if (!ev.id) continue;
+        const cur = (existing.events || []).find((row) => row.id === ev.id);
+        if (cur?.eventAt && !canEditBeforeEventCutoff(cur.eventAt)) {
+          return errorResponse(
+            res,
+            "Event can only be updated more than 48 hours before the event time.",
+            200,
+            "VALIDATION_ERROR",
+          );
+        }
+      }
       await prisma.$transaction(async (tx) => {
         const existingEvents = await tx.bookingEvent.findMany({
           where: { bookingId },
@@ -692,8 +955,21 @@ async function patchBooking(req, res) {
       body.service_charge_pct != null ? num(body.service_charge_pct) : num(existing.serviceChargePct);
     const txp = body.tax_pct != null ? num(body.tax_pct) : num(existing.taxPct);
 
-    const menuRows = await prisma.bookingMenuItem.findMany({ where: { bookingId } });
-    const pricing = computePricingFromSnapshots(menuRows, guests, discount, sc, txp);
+    const needsPricingRecalc = patchTouchesBookingPricing(body, existing);
+    const pricing = needsPricingRecalc
+      ? computePricingFromSnapshots(
+          await prisma.bookingMenuItem.findMany({ where: { bookingId } }),
+          guests,
+          discount,
+          sc,
+          txp,
+        )
+      : {
+          subtotal: num(existing.subtotal),
+          serviceChargeAmount: num(existing.serviceChargeAmount),
+          taxAmount: num(existing.taxAmount),
+          totalDue: num(existing.totalDue),
+        };
 
     if (num(existing.amountPaid) > pricing.totalDue + 0.02) {
       return errorResponse(
@@ -748,11 +1024,14 @@ async function patchBooking(req, res) {
       include: {
         menuItems: true,
         events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
-        payments: { orderBy: { createdAt: "desc" } },
       },
     });
 
-    return successResponse(res, "Booking updated", serializeBooking(updated));
+    return successResponse(
+      res,
+      "Booking updated",
+      serializeBooking(updated, { includePayments: false }),
+    );
   } catch (e) {
     console.error("patchBooking:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
@@ -778,10 +1057,10 @@ async function updateEvent(req, res) {
     if (existing.status === "CANCELLED") {
       return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
     }
-    if (existing.status !== "DRAFT") {
+    if (existing.status !== "DRAFT" && existing.status !== "CONFIRMED") {
       return errorResponse(
         res,
-        "Confirmed booking is locked for event/menu updates.",
+        "This booking cannot be updated.",
         200,
         "VALIDATION_ERROR",
       );
@@ -803,6 +1082,14 @@ async function updateEvent(req, res) {
     const current = (existing.events || []).find((ev) => ev.id === eventId);
     if (!current) {
       return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+    }
+    if (!canEditBeforeEventCutoff(current.eventAt)) {
+      return errorResponse(
+        res,
+        "Event can only be updated more than 48 hours before the event time.",
+        200,
+        "VALIDATION_ERROR",
+      );
     }
 
     await prisma.bookingEvent.update({
@@ -965,6 +1252,14 @@ async function deleteEvent(req, res) {
       return errorResponse(
         res,
         "Cannot delete the last event. Delete booking instead.",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (!canEditBeforeEventCutoff(target.eventAt)) {
+      return errorResponse(
+        res,
+        "Event can only be deleted more than 48 hours before the event time.",
         200,
         "VALIDATION_ERROR",
       );
@@ -1231,20 +1526,32 @@ async function getBooking(req, res) {
   try {
     const businessId = req.businessId;
     const bookingId = req.params.id;
+    const includePayments =
+      req.query.include_payments === "1" || req.query.include_payments === "true";
+    const skipImageEnrich =
+      req.query.enrich_images === "0" || req.query.enrich_images === "false";
 
     const row = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
       include: {
         menuItems: true,
         events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
-        payments: { orderBy: { createdAt: "desc" } },
+        ...(includePayments
+          ? { payments: { orderBy: { createdAt: "desc" } } }
+          : {}),
       },
     });
     if (!row) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
-    const enrichedRow = await enrichEventSnapshotMenuImages(row);
-    return successResponse(res, "OK", serializeBooking(enrichedRow));
+    const enrichedRow = skipImageEnrich
+      ? row
+      : await enrichEventSnapshotMenuImages(row);
+    return successResponse(
+      res,
+      "OK",
+      serializeBooking(enrichedRow, { includePayments }),
+    );
   } catch (e) {
     console.error("getBooking:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
@@ -1566,4 +1873,5 @@ module.exports = {
   retryBookingPdfJob,
   computePricingFromSnapshots,
   canEditMenuBeforeEvent,
+  canEditCustomerDetailsBeforeEvent,
 };
