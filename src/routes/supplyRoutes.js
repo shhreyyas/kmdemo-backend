@@ -32,6 +32,7 @@ const {
   listSupplySavedLists,
   getSupplySavedList,
   updateSupplySavedList,
+  assignSupplySavedListToBookingEvent,
   deleteSupplySavedList,
 } = require("../controllers/supplySavedListController");
 
@@ -165,6 +166,12 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   listSupplySavedLists,
+);
+router.post(
+  "/v1/supplySavedLists/:id/assignToEvent",
+  authMiddleware,
+  businessContextMiddleware,
+  assignSupplySavedListToBookingEvent,
 );
 router.get(
   "/v1/supplySavedLists/:id",
