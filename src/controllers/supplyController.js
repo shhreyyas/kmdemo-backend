@@ -745,6 +745,55 @@ async function setEventSupplyItems(req, res) {
   }
 }
 
+/**
+ * GET .../events/:eventId/supplySummary — lightweight flags for navigation/UI.
+ */
+async function getEventSupplySummary(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+    const eventId = req.params.eventId;
+
+    const event = await prisma.bookingEvent.findFirst({
+      where: {
+        id: eventId,
+        bookingId,
+        booking: { businessId },
+      },
+      select: { id: true },
+    });
+    if (!event) {
+      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+    }
+
+    const [ingredientCount, utensilCount, savedListCount] = await Promise.all([
+      prisma.bookingEventSupplyItem.count({
+        where: { bookingEventId: eventId, itemType: "INGREDIENT" },
+      }),
+      prisma.bookingEventSupplyItem.count({
+        where: { bookingEventId: eventId, itemType: "UTENSIL" },
+      }),
+      prisma.supplySavedList.count({
+        where: { businessId, bookingEventId: eventId },
+      }),
+    ]);
+
+    const hasIngredients = ingredientCount > 0;
+    const hasUtensils = utensilCount > 0;
+    const hasSavedList = savedListCount > 0;
+
+    return successResponse(res, "OK", {
+      has_ingredients: hasIngredients,
+      has_utensils: hasUtensils,
+      has_saved_list: hasSavedList,
+      has_supply_items: hasIngredients || hasUtensils || hasSavedList,
+    });
+  } catch (e) {
+    console.error("getEventSupplySummary:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 async function getEventSupplyItems(req, res) {
   try {
     const businessId = req.businessId;
@@ -1282,6 +1331,7 @@ module.exports = {
   getBookingSupplyItems,
   setEventSupplyItems,
   getEventSupplyItems,
+  getEventSupplySummary,
   getSuggestedEventSupplyFromMenu,
   createVendor,
   listVendors,

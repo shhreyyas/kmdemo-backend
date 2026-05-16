@@ -16,6 +16,7 @@ const {
   getBookingSupplyItems,
   setEventSupplyItems,
   getEventSupplyItems,
+  getEventSupplySummary,
   getSuggestedEventSupplyFromMenu,
   createVendor,
   listVendors,
@@ -115,6 +116,12 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   getEventSupplyItems,
+);
+router.get(
+  "/v1/bookings/:id/events/:eventId/supplySummary",
+  authMiddleware,
+  businessContextMiddleware,
+  getEventSupplySummary,
 );
 router.get(
   "/v1/bookings/:id/events/:eventId/suggestedSupplyFromMenu",
