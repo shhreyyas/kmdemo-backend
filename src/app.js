@@ -53,6 +53,12 @@ app.use("/api", appVersionRoutes);
 const supplyRoutes = require("./routes/supplyRoutes");
 app.use("/api", supplyRoutes);
 
+const staffRoutes = require("./routes/staffRoutes");
+app.use("/api", staffRoutes);
+
+const extraServiceRoutes = require("./routes/extraServiceRoutes");
+app.use("/api", extraServiceRoutes);
+
 // Test Route
 app.get("/", (req, res) => {
   res.send("Catering API Running");

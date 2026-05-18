@@ -67,6 +67,8 @@ model Business {
   supplyItems SupplyItem[]
   supplySavedLists SupplySavedList[]
   vendors     Vendor[]
+  staff       Staff[]
+  extraServices ExtraService[]
   billingSubscriptions BillingSubscription[]
   billingPaymentEvents BillingPaymentEvent[]
 }
@@ -269,6 +271,30 @@ enum QuotationStatus {
   ACCEPTED
 }
 
+enum StaffRole {
+  CHEF
+  HELPER
+  WAITER
+  MANAGER
+  CLEANER
+  VIP_SERVICE_BOY
+  COUNTER_STAFF
+  DECORATION_STAFF
+}
+
+enum StaffStatus {
+  AVAILABLE
+  BUSY
+  ON_LEAVE
+  INACTIVE
+}
+
+enum ExtraServicePricingType {
+  FIXED
+  PER_UNIT
+  PER_GUEST
+}
+
 model Booking {
   id     String @id @default(uuid())
   businessId String
@@ -304,6 +330,7 @@ model Booking {
   supplyItems BookingSupplyItem[]
   payments  PaymentTransaction[]
   events    BookingEvent[]
+  extraServiceLines BookingExtraServiceLine[]
 
   /// Set when the caterer marks the booking as completed in the app (dashboard / history).
   completedAt DateTime?
@@ -337,6 +364,8 @@ model BookingEvent {
   booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   supplyItems BookingEventSupplyItem[]
   supplySavedLists SupplySavedList[]
+  staffAssignments EventStaff[]
+  extraServiceLines BookingExtraServiceLine[]
 
   @@index([bookingId])
   @@index([bookingId, eventAt])
@@ -594,4 +623,76 @@ model Vendor {
   updatedAt  DateTime @updatedAt
 
   @@index([businessId, isActive])
+}
+
+model Staff {
+  id          String      @id @default(uuid())
+  businessId  String
+  business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name        String
+  phone       String?
+  role        StaffRole
+  dailyCharge Decimal?    @db.Decimal(12, 2)
+  status      StaffStatus @default(AVAILABLE)
+  isAvailable Boolean     @default(true)
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  assignments EventStaff[]
+
+  @@index([businessId, role, isActive])
+}
+
+model EventStaff {
+  id               String       @id @default(uuid())
+  bookingEventId   String
+  staffId          String
+  role             StaffRole
+  assignedByUserId String?
+  allowConflict    Boolean      @default(false)
+  createdAt        DateTime     @default(now())
+  bookingEvent     BookingEvent @relation(fields: [bookingEventId], references: [id], onDelete: Cascade)
+  staff            Staff        @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@unique([bookingEventId, staffId])
+  @@index([staffId])
+  @@index([bookingEventId])
+}
+
+model ExtraService {
+  id           String                  @id @default(uuid())
+  businessId   String
+  business     Business                @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  title        String
+  description  String?                 @db.Text
+  pricingType  ExtraServicePricingType
+  price        Decimal                 @db.Decimal(12, 2)
+  isOptional   Boolean                 @default(true)
+  isActive     Boolean                 @default(true)
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+  bookingLines BookingExtraServiceLine[]
+
+  @@index([businessId, isActive])
+}
+
+model BookingExtraServiceLine {
+  id                  String                  @id @default(uuid())
+  bookingId           String
+  eventId             String?
+  extraServiceId      String
+  quantity            Int                     @default(1)
+  unitPriceSnapshot   Decimal                 @db.Decimal(12, 2)
+  lineTotal           Decimal                 @db.Decimal(12, 2)
+  titleSnapshot       String
+  pricingTypeSnapshot ExtraServicePricingType
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  booking             Booking                 @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  event               BookingEvent?           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  extraService        ExtraService            @relation(fields: [extraServiceId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId])
+  @@index([bookingId, eventId])
+  @@index([extraServiceId])
 }

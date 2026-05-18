@@ -63,7 +63,8 @@ function computePricingFromSnapshots(rows, guestCount, discount, servicePct, tax
   }, 0);
   const subtotal = perPlateTotal * guests;
   const serviceChargeAmount = subtotal * (servicePct / 100);
-  const taxAmount = subtotal * (taxPct / 100);
+  // Tax on food + service (aligned with app getBookingPricingBreakdown)
+  const taxAmount = (subtotal + serviceChargeAmount) * (taxPct / 100);
   const disc = Math.max(0, num(discount));
   const totalDue = Math.max(0, subtotal + serviceChargeAmount + taxAmount - disc);
   return {
@@ -219,41 +220,11 @@ function isCustomerDetailsOnlyPatch(body) {
   return isConfirmedLimitedPatch(body);
 }
 
-function deriveEventSubtotal(ev) {
-  if (ev?.eventTotal != null) return num(ev.eventTotal);
-  const guests = Math.max(0, Number(ev?.guestCount ?? 0) || 0);
-  const snapshotPrice = Number(ev?.eventSnapshot?.price_per_plate ?? 0) || 0;
-  return guests * snapshotPrice;
-}
-
-/**
- * Food + booking-level service/tax/discount (aligned with app `getBookingPricingBreakdown`).
- * Used when stored `totalDue` is 0 or too low — e.g. confirmBooking only priced root guestCount
- * while multiple events each have their own totals.
- */
-function computeBookingTotalDueFromEvents(booking) {
-  const events = booking.events || [];
-  let foodSum = 0;
-  for (const ev of events) {
-    foodSum += deriveEventSubtotal(ev);
-  }
-  if (foodSum <= 0) return 0;
-
-  let serviceAmt = num(booking.serviceChargeAmount);
-  const servicePct = num(booking.serviceChargePct);
-  if (serviceAmt <= 0 && servicePct > 0) {
-    serviceAmt = foodSum * (servicePct / 100);
-  }
-
-  let taxAmt = num(booking.taxAmount);
-  const taxPct = num(booking.taxPct);
-  if (taxAmt <= 0 && taxPct > 0) {
-    taxAmt = (foodSum + serviceAmt) * (taxPct / 100);
-  }
-
-  const disc = num(booking.discountAmount);
-  return Math.max(0, foodSum + serviceAmt + taxAmt - disc);
-}
+const {
+  deriveEventFoodSubtotal,
+  deriveEventSubtotal,
+  computeBookingTotalDueFromEvents,
+} = require("./bookingPricingHelpers");
 
 /** Prefer max(stored, event-derived) when events imply a higher balance than `booking.totalDue`. */
 function resolveTotalDueForPayment(booking) {
@@ -277,7 +248,7 @@ function serializeBookingEvent(ev) {
     parent_dish_id: ev.parentDishId ?? null,
     is_template: ev.isTemplate ?? null,
     event_total: ev.eventTotal != null ? num(ev.eventTotal) : null,
-    event_subtotal: deriveEventSubtotal(ev),
+    event_subtotal: deriveEventFoodSubtotal(ev),
     event_snapshot: ev.eventSnapshot ?? null,
     created_at: ev.createdAt?.toISOString?.() ?? ev.createdAt,
     updated_at: ev.updatedAt?.toISOString?.() ?? ev.updatedAt,
@@ -409,6 +380,19 @@ function serializeBooking(b, { includePayments = true } = {}) {
   const rootGuests = firstEvent?.guest_count ?? b.guestCount ?? null;
   const rootFn = firstEvent?.function_type ?? b.functionType ?? null;
 
+  const extraServiceLines = (b.extraServiceLines || []).map((line) => ({
+    id: line.id,
+    booking_id: line.bookingId,
+    event_id: line.eventId ?? null,
+    extra_service_id: line.extraServiceId,
+    quantity: line.quantity ?? 1,
+    unit_price_snapshot: num(line.unitPriceSnapshot),
+    line_total: num(line.lineTotal),
+    title_snapshot: line.titleSnapshot,
+    pricing_type_snapshot: line.pricingTypeSnapshot,
+  }));
+  const extraCharges = extraServiceLines.reduce((s, l) => s + l.line_total, 0);
+
   return {
     id: b.id,
     business_id: b.businessId,
@@ -438,6 +422,8 @@ function serializeBooking(b, { includePayments = true } = {}) {
     payment_status: b.paymentStatus,
     menu_items: menuItems,
     events: serializedEvents,
+    extra_service_lines: extraServiceLines,
+    extra_charges: extraCharges,
     ...(payments !== undefined ? { payments } : {}),
     can_edit_menu: canEditMenuBeforeEvent(firstEvent?.event_at ?? bookingAtIso),
     can_edit_customer_details: canEditCustomerDetailsBeforeEvent(
@@ -493,6 +479,7 @@ async function loadBookingForBusiness(bookingId, businessId, extras = {}) {
     where: { id: bookingId, businessId },
     include: {
       menuItems: true,
+      extraServiceLines: true,
       events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
       ...(extras.includePayments
         ? { payments: { orderBy: { createdAt: "desc" } } }
@@ -956,7 +943,7 @@ async function patchBooking(req, res) {
     const txp = body.tax_pct != null ? num(body.tax_pct) : num(existing.taxPct);
 
     const needsPricingRecalc = patchTouchesBookingPricing(body, existing);
-    const pricing = needsPricingRecalc
+    let pricing = needsPricingRecalc
       ? computePricingFromSnapshots(
           await prisma.bookingMenuItem.findMany({ where: { bookingId } }),
           guests,
@@ -970,6 +957,24 @@ async function patchBooking(req, res) {
           taxAmount: num(existing.taxAmount),
           totalDue: num(existing.totalDue),
         };
+    const dueSnapshot = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        serviceChargeAmount: true,
+        serviceChargePct: true,
+        taxAmount: true,
+        taxPct: true,
+        discountAmount: true,
+        events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+        extraServiceLines: true,
+      },
+    });
+    const totalFromEvents = computeBookingTotalDueFromEvents(
+      dueSnapshot || existing,
+    );
+    if (totalFromEvents > 0) {
+      pricing = { ...pricing, totalDue: totalFromEvents };
+    }
 
     if (num(existing.amountPaid) > pricing.totalDue + 0.02) {
       return errorResponse(
@@ -1385,6 +1390,72 @@ async function getDashboard(req, res) {
 }
 
 /**
+ * GET /v1/bookings/customers/search?q=...&limit=10
+ * Distinct past customers for autocomplete (min 3 characters).
+ */
+async function searchBookingCustomers(req, res) {
+  try {
+    const businessId = req.businessId;
+    const q = (
+      queryStringParam(req.query.q) || queryStringParam(req.query.search)
+    )
+      .trim()
+      .slice(0, 80);
+
+    if (q.length < 3) {
+      return successResponse(res, "OK", { customers: [] });
+    }
+
+    const take = queryNumberParam(req.query.limit, 10, { min: 1, max: 15 });
+    const ic = { contains: q, mode: "insensitive" };
+
+    const rows = await prisma.booking.findMany({
+      where: {
+        businessId,
+        OR: [
+          { customerName: ic },
+          { customerPhone: ic },
+          { customerEmail: ic },
+        ],
+      },
+      select: {
+        customerName: true,
+        customerPhone: true,
+        customerEmail: true,
+        updatedAt: true,
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 40,
+    });
+
+    const seen = new Set();
+    const customers = [];
+    for (const row of rows) {
+      const name = String(row.customerName ?? "").trim();
+      const phone = String(row.customerPhone ?? "").trim();
+      const email = String(row.customerEmail ?? "").trim();
+      if (!name && !phone) continue;
+      const key = phone
+        ? `p:${phone}`
+        : `n:${name.toLowerCase()}|${email.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      customers.push({
+        customer_name: name || null,
+        customer_phone: phone || null,
+        customer_email: email || null,
+      });
+      if (customers.length >= take) break;
+    }
+
+    return successResponse(res, "OK", { customers });
+  } catch (e) {
+    console.error("searchBookingCustomers:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
  * GET /v1/bookings
  */
 async function listBookings(req, res) {
@@ -1535,6 +1606,7 @@ async function getBooking(req, res) {
       where: { id: bookingId, businessId },
       include: {
         menuItems: true,
+        extraServiceLines: true,
         events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
         ...(includePayments
           ? { payments: { orderBy: { createdAt: "desc" } } }
@@ -1864,6 +1936,7 @@ module.exports = {
   deleteEvent,
   getDashboard,
   listBookings,
+  searchBookingCustomers,
   getBooking,
   completeBookingOrder,
   deleteBooking,

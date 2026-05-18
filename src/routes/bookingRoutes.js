@@ -10,6 +10,7 @@ const {
   deleteEvent,
   getDashboard,
   listBookings,
+  searchBookingCustomers,
   getBooking,
   completeBookingOrder,
   deleteBooking,
@@ -49,6 +50,14 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   getDashboard,
+);
+
+// Past customer search (new booking autocomplete)
+router.get(
+  "/v1/bookings/customers/search",
+  authMiddleware,
+  businessContextMiddleware,
+  searchBookingCustomers,
 );
 
 // List Bookings
