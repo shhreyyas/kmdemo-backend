@@ -15,16 +15,16 @@ const {
 const authMiddleware = require("../middleware/authMiddleware");
 const { uploadProfileImage } = require("../controllers/uploadController");
 
-router.post("/signup", signup);
-router.post("/verify-otp", verifyOtp);
-router.post("/signin", signIn);
-router.post("/resend-otp", resendOtp);
-router.post("/forgot-password", forgotPassword);
-router.post("/verify-forgot-otp", verifyForgotOtp);
-router.post("/resend-forgot-otp", resendForgotOtp);
-router.post("/new-password", newPassword);
+router.post("/v1/signup", signup);
+router.post("/v1/verify-otp", verifyOtp);
+router.post("/v1/signin", signIn);
+router.post("/v1/resend-otp", resendOtp);
+router.post("/v1/forgot-password", forgotPassword);
+router.post("/v1/verify-forgot-otp", verifyForgotOtp);
+router.post("/v1/resend-forgot-otp", resendForgotOtp);
+router.post("/v1/new-password", newPassword);
 router.post("/v1/upload-profile-image", authMiddleware, uploadProfileImage);
-router.patch("/user/profile", authMiddleware, updateUserProfile);
-router.post("/delete-user", deleteUser);
+router.patch("/v1/user/profile", authMiddleware, updateUserProfile);
+router.post("/v1/delete-user", deleteUser);
 
 module.exports = router;

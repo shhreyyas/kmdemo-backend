@@ -12,8 +12,26 @@ const {
   normalizeLocalizedName,
   resolveLocalizedName,
 } = require("../utils/localization");
+const { uploadBase64ToBucket } = require("../utils/uploadBase64Image");
 
 const TRIAL_DAYS = 30;
+const BUSINESS_LOGO_BUCKET = "business_profile_pictures";
+
+async function resolveBusinessLogoUrl({ business_logo, business_logo_base64, business_logo_mime }) {
+  if (business_logo_base64) {
+    return uploadBase64ToBucket({
+      bucket: BUSINESS_LOGO_BUCKET,
+      base64: business_logo_base64,
+      mime: business_logo_mime,
+      logLabel: "registerBusiness",
+    });
+  }
+  const url = typeof business_logo === "string" ? business_logo.trim() : "";
+  if (url && /^https?:\/\//i.test(url)) {
+    return { ok: true, url };
+  }
+  return { ok: true, url: url || null };
+}
 
 const ALLOWED_CATERING = new Set(["veg", "non_veg"]);
 /**
@@ -138,6 +156,8 @@ exports.registerBusiness = async (req, res) => {
 
     const {
       business_logo,
+      business_logo_base64,
+      business_logo_mime,
       business_name,
       business_owner_name,
       same_as_owner_number,
@@ -242,14 +262,25 @@ exports.registerBusiness = async (req, res) => {
       }
     }
 
+    const logoResult = await resolveBusinessLogoUrl({
+      business_logo,
+      business_logo_base64,
+      business_logo_mime,
+    });
+    if (!logoResult.ok) {
+      const status = logoResult.code === "UPLOAD_ERROR" ? 500 : 422;
+      return errorResponse(res, logoResult.message, status, logoResult.code);
+    }
+    const resolvedLogoUrl = logoResult.url;
+
     const now = new Date();
     const subscriptionEnd = new Date(now);
     subscriptionEnd.setDate(subscriptionEnd.getDate() + TRIAL_DAYS);
 
-    const business = await prisma.$transaction(async (tx) => {
+    const fullBusiness = await prisma.$transaction(async (tx) => {
       const b = await tx.business.create({
         data: {
-          logoUrl: business_logo ?? null,
+          logoUrl: resolvedLogoUrl,
           name: business_name,
           ownerName: business_owner_name ?? "",
           sameAsOwnerNumber: Boolean(same_as_owner_number),
@@ -270,12 +301,12 @@ exports.registerBusiness = async (req, res) => {
         },
       });
 
-      for (const st of existingSlugs) {
-        await tx.businessServiceType.create({
-          data: {
+      if (existingSlugs.length > 0) {
+        await tx.businessServiceType.createMany({
+          data: existingSlugs.map((st) => ({
             businessId: b.id,
             serviceTypeId: st.id,
-          },
+          })),
         });
       }
 
@@ -289,30 +320,34 @@ exports.registerBusiness = async (req, res) => {
         data: userUpdate,
       });
 
-      return b;
+      return tx.business.findUnique({
+        where: { id: b.id },
+        include: {
+          serviceLinks: { include: { serviceType: true } },
+        },
+      });
     });
 
-    const fullBusiness = await prisma.business.findUnique({
-      where: { id: business.id },
-      include: {
-        serviceLinks: { include: { serviceType: true } },
-      },
-    });
+    if (!fullBusiness) {
+      return errorResponse(res, "Server error", 500, "ERROR");
+    }
 
     const token = jwt.sign(
-      { userId, businessId: business.id, role: user.role },
+      { userId, businessId: fullBusiness.id, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
 
     const device = user.devices[0];
-    const business_details = fullBusiness
-      ? [formatBusinessDetail(fullBusiness)]
-      : [];
+    const business_details = [formatBusinessDetail(fullBusiness)];
 
-    const refreshed = await prisma.user.findUnique({
-      where: { id: userId },
-    });
+    const refreshed = {
+      ...user,
+      businessId: fullBusiness.id,
+      pdfPrefix: isUnsetPdfPrefix(user.pdfPrefix)
+        ? deriveDefaultPdfPrefix(business_name)
+        : user.pdfPrefix,
+    };
 
     const formattedUser = formatUserResponse(refreshed, {
       status: 1,
@@ -356,6 +391,8 @@ exports.updateBusiness = async (req, res) => {
       business_address,
       contact_number,
       business_email,
+      default_service_charge_pct,
+      default_tax_pct,
     } = req.body;
 
     const data = {};
@@ -375,6 +412,30 @@ exports.updateBusiness = async (req, res) => {
     }
     if (business_email !== undefined) {
       data.email = String(business_email).trim() || "";
+    }
+    if (default_service_charge_pct !== undefined) {
+      const sc = Number(default_service_charge_pct);
+      if (!Number.isFinite(sc) || sc < 0 || sc > 100) {
+        return errorResponse(
+          res,
+          "Service charge % must be between 0 and 100",
+          400,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.defaultServiceChargePct = sc;
+    }
+    if (default_tax_pct !== undefined) {
+      const tx = Number(default_tax_pct);
+      if (!Number.isFinite(tx) || tx < 0 || tx > 100) {
+        return errorResponse(
+          res,
+          "Tax % must be between 0 and 100",
+          400,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.defaultTaxPct = tx;
     }
 
     if (Object.keys(data).length === 0) {

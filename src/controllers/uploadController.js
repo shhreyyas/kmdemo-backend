@@ -1,20 +1,5 @@
-const crypto = require("crypto");
-const supabase = require("../config/supabase");
 const { successResponse, errorResponse } = require("../utils/response");
-
-const MAX_BYTES = 5 * 1024 * 1024; // 5MB
-const ALLOWED_MIME = new Map([
-  ["image/jpeg", "jpg"],
-  ["image/jpg", "jpg"],
-  ["image/png", "png"],
-  ["image/webp", "webp"],
-]);
-
-function stripDataUrlBase64(raw) {
-  if (typeof raw !== "string") return raw;
-  const m = /^data:image\/[\w+.-]+;base64,(.+)$/i.exec(raw.trim());
-  return m ? m[1] : raw.trim();
-}
+const { uploadBase64ToBucket } = require("../utils/uploadBase64Image");
 
 /**
  * @param {string} bucket - Supabase Storage bucket name
@@ -23,68 +8,22 @@ function createBase64ImageHandler(bucket, logLabel) {
   return async (req, res) => {
     try {
       const { base64, mime: mimeRaw } = req.body;
-      if (base64 == null || typeof base64 !== "string") {
-        return errorResponse(
-          res,
-          "base64 image data is required",
-          422,
-          "VALIDATION_ERROR",
-        );
+      const result = await uploadBase64ToBucket({
+        bucket,
+        base64,
+        mime: mimeRaw,
+        logLabel,
+      });
+
+      if (!result.ok) {
+        const status = result.code === "UPLOAD_ERROR" ? 500 : 422;
+        return errorResponse(res, result.message, status, result.code);
       }
-
-      const b64 = stripDataUrlBase64(base64);
-      let mime =
-        typeof mimeRaw === "string" ? mimeRaw.trim().toLowerCase() : "image/jpeg";
-      if (!mime.startsWith("image/")) {
-        mime = "image/jpeg";
-      }
-
-      const ext = ALLOWED_MIME.get(mime);
-      if (!ext) {
-        return errorResponse(
-          res,
-          "Only JPEG, PNG, or WebP images are allowed",
-          422,
-          "VALIDATION_ERROR",
-        );
-      }
-
-      let buffer;
-      try {
-        buffer = Buffer.from(b64, "base64");
-      } catch {
-        return errorResponse(res, "Invalid base64 data", 422, "VALIDATION_ERROR");
-      }
-
-      if (!buffer.length) {
-        return errorResponse(res, "Empty image data", 422, "VALIDATION_ERROR");
-      }
-      if (buffer.length > MAX_BYTES) {
-        return errorResponse(res, "Image must be 5MB or smaller", 422, "VALIDATION_ERROR");
-      }
-
-      const fileName = `${crypto.randomUUID()}.${ext}`;
-
-      const { error } = await supabase.storage
-        .from(bucket)
-        .upload(fileName, buffer, {
-          contentType: mime,
-          upsert: false,
-        });
-
-      if (error) {
-        console.error(`${logLabel} supabase upload error:`, error.message);
-        return errorResponse(res, "Failed to upload image", 500, "UPLOAD_ERROR");
-      }
-
-      const { data: publicUrlData } = supabase.storage
-        .from(bucket)
-        .getPublicUrl(fileName);
 
       return successResponse(
         res,
         "Image uploaded successfully",
-        { url: publicUrlData.publicUrl },
+        { url: result.url },
         200,
       );
     } catch (error) {
