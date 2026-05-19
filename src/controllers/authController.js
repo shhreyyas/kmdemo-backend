@@ -64,6 +64,8 @@ function formatBusinessDetail(business) {
       end: business.subscriptionEnd?.toISOString() ?? null,
     },
     is_trial_used: business.isTrialUsed,
+    default_service_charge_pct: Number(business.defaultServiceChargePct ?? 10),
+    default_tax_pct: Number(business.defaultTaxPct ?? 5),
   };
 }
 
@@ -114,12 +116,30 @@ exports.signup = async (req, res) => {
       );
     }
 
+    const phoneDigits = String(contact).replace(/\D/g, "").slice(0, 10);
+    if (!phoneDigits) {
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
     const existingUser = await prisma.user.findUnique({
       where: { email },
     });
 
     if (existingUser) {
       return errorResponse(res, "Email already registered.", 200, "USER_EXISTS");
+    }
+
+    const existingByPhone = await prisma.user.findFirst({
+      where: { phoneNumber: phoneDigits },
+    });
+
+    if (existingByPhone) {
+      return errorResponse(res, "Phone number already registered.", 200, "USER_EXISTS");
     }
 
     const hashedPassword = await bcrypt.hash(password, 8);
@@ -131,7 +151,7 @@ exports.signup = async (req, res) => {
         name,
         email,
         passwordHash: hashedPassword,
-        phoneNumber: contact,
+        phoneNumber: phoneDigits,
         businessId: null,
         notificationStatus,
       },
@@ -186,6 +206,9 @@ exports.signup = async (req, res) => {
       const fields = Array.isArray(target) ? target : target != null ? [target] : [];
       if (fields.some((f) => String(f).toLowerCase().includes("email"))) {
         return errorResponse(res, "Email already registered.", 200, "USER_EXISTS");
+      }
+      if (fields.some((f) => String(f).toLowerCase().includes("phone"))) {
+        return errorResponse(res, "Phone number already registered.", 200, "USER_EXISTS");
       }
     }
     return errorResponse(res, "User registration failed.", 500, "ERROR");
