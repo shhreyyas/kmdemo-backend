@@ -53,7 +53,7 @@ function paymentStatusFromAmounts(amountPaid, totalDue) {
   const paid = num(amountPaid);
   const due = num(totalDue);
   if (paid <= 0) return "PENDING";
-  if (paid >= due - 0.01) return "PAID";
+  if (paid >= due - 0.01) return "RECEIVED";
   return "PARTIAL";
 }
 
