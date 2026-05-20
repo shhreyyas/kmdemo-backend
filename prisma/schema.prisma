@@ -244,7 +244,7 @@ enum BookingStatus {
 enum PaymentStatus {
   PENDING
   PARTIAL
-  PAID
+  RECEIVED
 }
 
 enum PaymentMethod {

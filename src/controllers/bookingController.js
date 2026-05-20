@@ -80,7 +80,7 @@ function paymentStatusFromAmounts(amountPaid, totalDue) {
   const paid = num(amountPaid);
   const due = num(totalDue);
   if (paid <= 0) return "PENDING";
-  if (paid >= due - 0.01) return "PAID";
+  if (paid >= due - 0.01) return "RECEIVED";
   return "PARTIAL";
 }
 
@@ -419,7 +419,7 @@ function serializeBooking(b, { includePayments = true } = {}) {
     /** Mirrors `total_due` for clients that resolve totals from `final_amount`. */
     final_amount: num(b.totalDue),
     amount_paid: num(b.amountPaid),
-    payment_status: b.paymentStatus,
+    payment_status: paymentStatusFromAmounts(num(b.amountPaid), num(b.totalDue)),
     menu_items: menuItems,
     events: serializedEvents,
     extra_service_lines: extraServiceLines,
@@ -1488,7 +1488,9 @@ async function listBookings(req, res) {
       clauses.push({ status });
     }
     if (payment_status) {
-      clauses.push({ paymentStatus: payment_status });
+      const normalizedPaymentStatus =
+        payment_status === "PAID" ? "RECEIVED" : payment_status;
+      clauses.push({ paymentStatus: normalizedPaymentStatus });
     }
     if (event_from || event_to) {
       const eventRange = {};
